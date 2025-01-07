@@ -1,0 +1,8 @@
+bert_model: "distilbert/distilbert-base-cased"
+device: "cuda"
+lr: 0.00001
+n_heads: 8
+batch_size: 8
+epochs: 3
+block_size: 52
+bert_block_size: 100
