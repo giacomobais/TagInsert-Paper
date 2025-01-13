@@ -9,7 +9,8 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModel, DistilBertTokenizer
 import wandb
-from src.models.VanillaTransformer import make_model
+from src.models.VanillaTransformer import make_model_VT
+from src.models.TagInsert import make_model_TI
 
 def load_config(config_path):
     with open(config_path) as file:
@@ -91,6 +92,8 @@ def prepare_data(train_file, val_file, test_file, block_size = 52):
     # add padding, unknown, and start tokens
     POS_to_idx["<PAD>"] = 0
     POS_to_idx["<START>"] = len(POS_to_idx)
+    POS_to_idx["<UNK>"] = len(POS_to_idx)
+    POS_to_idx["<END>"] = len(POS_to_idx)
     idx_to_POS = {k: v for v, k in POS_to_idx.items()}
 
     # convert data to integers
@@ -296,14 +299,15 @@ def save_model(model, optimizer, lr_scheduler, train_losses, val_losses, epochs,
                 'epochs': epochs
                 }, path)
 
-def load_model(path, config):
-    word_to_idx = json.load(open('data/POS/processed/word_to_idx.json'))
-    POS_to_idx = json.load(open('data/POS/processed/POS_to_idx.json'))
-    model = make_model(len(word_to_idx), len(POS_to_idx), d_model = 768, N=config['n_heads'])
+def load_model(model_name, path, config, tagging):
+    if model_name == "VT":
+        model = make_model_VT(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+    elif model_name == "TI":
+        model = make_model_TI(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
     model = model.to(config['device'])
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.5, betas=(0.9, 0.98), eps=1e-9) #TODO: change hyperparameters with config
-    lr_scheduler = LambdaLR(optimizer=optimizer,lr_lambda=lambda step: rate(step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=400),)
-    checkpoint = torch.load(path)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], betas=(config['betas'][0], config['betas'][1]), eps=config['eps']) 
+    lr_scheduler = LambdaLR(optimizer=optimizer,lr_lambda=lambda step: rate(step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=config['warmup']),)
+    checkpoint = torch.load(path, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'], strict = True)
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -321,7 +325,7 @@ def subsequent_mask(size):
     )
     return subsequent_mask == 0
 
-class Batch:
+class Batch_VT:
     """Object for holding a batch of data with mask during training."""
 
     def __init__(self, src, tgt=None, embs = None, pad=0):  # 2 = <blank>
@@ -329,6 +333,7 @@ class Batch:
         self.src_mask = (src != pad).unsqueeze(-2)
         self.embs = embs
         if tgt is not None:
+            self.seq_lengths = [torch.nonzero(tgt[i] == 0, as_tuple = False)[0,0].item()-1 if torch.nonzero(tgt[i] == 0, as_tuple = False).numel() > 0 else 51 for i in range(tgt.size(0))]
             self.tgt = tgt[:, :-1]
             self.tgt_y = tgt[:, 1:]
             self.tgt_mask = self.make_std_mask(self.tgt, pad)
@@ -341,6 +346,63 @@ class Batch:
         tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(
             tgt_mask.data
         )
+        return tgt_mask
+
+class Batch_TI:
+    "Object for holding a batch of data with mask during training."
+    def __init__(self, config, tgt_map, src, trg=None, embs = None, pad=0):
+        self.src = src
+        self.src_mask = (src != pad).unsqueeze(-2)
+        if trg is not None:
+            # extracting length of each sentence
+            first_pads = [torch.nonzero(trg[i] == 0, as_tuple = False)[0,0].item()-1 if torch.nonzero(trg[i] == 0, as_tuple = False).numel() > 0 else config['block_size']-1 for i in range(trg.size(0))]
+            self.sequence_lengths = first_pads
+            new_trg = torch.zeros((src.size(0), config['block_size']), dtype = torch.int64).to(config['device'])
+            new_trg_y = torch.zeros((src.size(0), config['block_size']), dtype = torch.int64).to(config['device']) # for each slot, the tokens yet to insert
+            self.trajectory = []
+            self.inserted = torch.zeros(src.size(0), dtype = torch.int64)
+            for i, train in enumerate(trg):
+              # current_sep = self.sep[i].item()
+              all_ixs = torch.arange(start = 1, end = first_pads[i]+1)
+              permuted_ixs = torch.randperm(all_ixs.size(0))
+              permuted_all_ixs = all_ixs[permuted_ixs]
+              self.trajectory.append(permuted_all_ixs)
+              # constructing actual y to be forwarded
+              # vec = torch.ones(BLOCK_SIZE).to(device)
+              vec = torch.full((config['block_size'],), tgt_map['<UNK>'])
+              targets = torch.zeros(config['block_size']).to(config['device'])
+              vec[0] = tgt_map['<START>']
+              vec[self.sequence_lengths[i]+1] = tgt_map['<END>']
+              vec[self.sequence_lengths[i]+2:] = tgt_map['<PAD>']
+              new_trg[i] = vec
+              ins = 0
+              for j, ix in enumerate(vec):
+                if ix == tgt_map['<UNK>']:
+                  targets[ins] = train[j-1]
+                  ins+=1
+              new_trg_y[i] = targets
+            self.trg = new_trg
+            self.trg_y = new_trg_y
+            self.trg_mask = self.make_std_mask(self.trg, pad)
+            nonpads = (self.trg_y != pad).data.sum()
+            self.ntokens = nonpads
+
+            # print('trajectory:', self.trajectory)
+            self.embs = embs
+
+    def next_trajectory(self):
+        for i, ins in enumerate(self.inserted):
+            if ins >= self.sequence_lengths[i]:
+              continue
+            next_tag_pos = self.trajectory[i][ins].item()
+            self.trg[i][next_tag_pos] = self.trg_y[i][next_tag_pos-1]
+            self.inserted[i] += 1
+
+    @staticmethod
+    def make_std_mask(tgt, pad):
+        "Create a mask to hide padding and future words."
+        tgt_mask = (tgt != pad).unsqueeze(-2)
+        tgt_mask = tgt_mask# & Variable(subsequent_mask(tgt.size(-1)).type_as(tgt_mask.data))
         return tgt_mask
 
 class DummyOptimizer(torch.optim.Optimizer):
@@ -383,7 +445,8 @@ class LabelSmoothing(nn.Module):
         self.true_dist = true_dist
         return self.criterion(x, true_dist.clone().detach())
 
-class SimpleLossCompute:
+
+class LossCompute_VT:
     "A simple loss compute and train function."
 
     def __init__(self, generator, criterion):
@@ -399,20 +462,84 @@ class SimpleLossCompute:
             / norm
         )
         return sloss.data * norm, sloss
+    
+class TI_Loss(nn.Module):
+  def __init__(self, config, tgt_map):
+    super(TI_Loss, self).__init__()
+    self.tgt_map = tgt_map
+    self.config = config
 
-def resume_training(config):
+  def sentence_loss(self, logits, forwarded_trgs, targets, sequence_length):
+    # logits has shape (51, 52), they are the logits for all slots of the i-th sentence
+    # targets has shape (51, 52), they are the actual tokens for each span, only the first k+1 spans are filled
+    # k = len(spans_del) # also known as k
+    losses = []
+    # extracting the number of tokens in a span L
+    for i, ix in enumerate(forwarded_trgs):
+      if ix == self.tgt_map['<PAD>']:
+        break
+      if ix == self.tgt_map['<UNK>']:
+        tag_to_insert = targets[i-1]
+        # print(tag_to_insert)
+        p = logits[i][tag_to_insert]
+        losses.append(-torch.log(p))
+        # print('---------------------')
+    if len(losses) == 0:
+      tag_to_insert = self.tgt_map['<END>']
+      # print(tag_to_insert, sequence_length+2)
+      p = logits[sequence_length+2, tag_to_insert]
+      losses.append(-torch.log(p))
+    out = torch.mean(torch.stack(losses))
+    return out
+
+  def forward(self, logits, forwarded_trgs, targets, sequence_lengths, inserted):
+    # logits will have shape (256, 51, 52), 2nd dim are slots and 3rd dim is the vocab
+    # targets will have shape (256, 50), 1st dim are the k+1 slots to which loss needs to be computed, while 2nd dim are the words to be inserted in that slot
+    # ixs will have shape (256, 50), for each sentence the indeces of the spans, k can retrieve how many
+    # sep has shape (256), one k for each sentence
+    batch_losses = []
+    for i, _ in enumerate(targets):
+        if inserted[i] >= sequence_lengths[i]:
+          continue
+      # if i == 0:
+        # slot_losses = torch.zeros(k.item()+1).to(device) #k+1 slots
+        # spans_del = ixs[i, :k] # the k indeces delimitating the spans 1-2-6
+        batch_loss = self.sentence_loss(logits[i, :, :], forwarded_trgs[i, :], targets[i, :], sequence_lengths[i])
+        # print("loss of a single sequence: ",batch_loss)
+        batch_losses.append(batch_loss)
+    loss = torch.mean(torch.stack(batch_losses))
+    # print(loss)
+    return loss
+
+class LossCompute_TI:
+    "A simple loss compute and train function."
+    def __init__(self, generator, criterion, opt=None):
+        self.generator = generator
+        self.criterion = criterion
+        self.opt = opt
+
+    def __call__(self, x, forwarded_y, y, sequence_lengths, norm, inserted):
+        # SLOTS = 51, VOCAB = 52
+        x = self.generator(x) # shape (B, S * V)
+        if norm == 0:
+          norm = 1
+        loss = self.criterion(x, forwarded_y, y, sequence_lengths, inserted)
+        return loss.data * norm, loss
+
+def resume_training(model_path, config, model_name, tagging):
     try:
-        model, model_opt, lr_scheduler, logs = load_model("models/VanillaTransformer_POS")
+        model, model_opt, lr_scheduler, logs = load_model(model_name, model_path, config)
         trained_epochs = logs['epochs']
         train_losses = logs['train_losses']
         val_losses = logs['val_losses']
         print('Loading a pre-existent model.')
     except:
-        word_to_idx = json.load(open('data/POS/processed/word_to_idx.json'))
-        POS_to_idx = json.load(open('data/POS/processed/POS_to_idx.json'))
-        model = make_model(len(word_to_idx), len(POS_to_idx), d_model = 768, N=config['n_heads']) #TODO: change hyperparameters with config
-        model_opt = torch.optim.Adam(model.parameters(), lr=0.5, betas=(0.9, 0.98), eps=1e-9)
-        lr_scheduler = LambdaLR(optimizer=model_opt,lr_lambda=lambda step: rate(step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=400),)
+        if model_name == "VT":
+            model = make_model_VT(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+        elif model_name == "TI":
+            model = make_model_TI(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+        model_opt = torch.optim.Adam(model.parameters(), lr=config['lr'], betas=(config['betas'][0], config['betas'][1]), eps=config['eps']) 
+        lr_scheduler = LambdaLR(optimizer=model_opt,lr_lambda=lambda step: rate(step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=config['warmup']),)
         trained_epochs = 0
         train_losses = []
         val_losses = []
@@ -429,29 +556,27 @@ class TrainState:
     accum_step: int = 0  # Number of gradient accumulation steps
     samples: int = 0  # total # of examples used
     tokens: int = 0  # total # of tokens processed
+    eval_step: int = 0  # Steps in the current evaluation
 
 
-
-def get_embs(original_sentences, bert_model, tokenizer, config):
-    src_embs = extract_BERT_embs(original_sentences, bert_model, tokenizer, config)
-    return src_embs
-
-
-def dataload(data_loader, config, bert_model, tokenizer, pad=0):
+def dataload(data_loader, config, bert_model, tokenizer, tgt_map, pad=0):
     for batch_data in data_loader:
         xb, yb, original_sentences = batch_data
-        embs = get_embs(original_sentences, bert_model, tokenizer, config)
+        embs = extract_BERT_embs(original_sentences, bert_model, tokenizer, config)
         src = xb.to(config['device'])
         tgt = yb.to(config['device'])
         embs = embs.to(config['device'])
-        yield Batch(src, tgt, embs, pad=pad)
+        if config['model_name'] == "VanillaTransformer":
+            yield Batch_VT(src, tgt, pad=pad)
+        elif config['model_name'] == "TagInsert":
+            yield Batch_TI(config, tgt_map, src, tgt, embs, pad=pad)
 
 
-def run_epoch(data_iter, model, loss_compute, optimizer, lr_scheduler, config, data_len, mode = 'train', accum_iter = 1, train_state = TrainState()):
+def run_epoch_VT(data_iter, model, loss_compute, optimizer, lr_scheduler, config, data_len, mode = 'train', accum_iter = 1, train_state = TrainState()):
     total_tokens = 0
     total_loss = 0
-    n_accum = 0
     losses = []
+    log_id = "Batch train loss" if mode == "train" else "Batch val loss"
     with tqdm(data_iter, total = data_len // config['batch_size'], desc=mode) as pbar:
         for i, batch in enumerate(pbar):
             out = model.forward(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask, batch.embs)
@@ -465,16 +590,60 @@ def run_epoch(data_iter, model, loss_compute, optimizer, lr_scheduler, config, d
                 if (i + 1) % accum_iter == 0:
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
-                    n_accum += 1
                     train_state.accum_step += 1
+                wandb.log({log_id: loss_node.item(), "train_step": train_state.step})
                 lr_scheduler.step()
+            else:
+                train_state.eval_step += 1
+                wandb.log({log_id: loss_node.item(), "val_step": train_state.eval_step})
             total_loss += loss
             total_tokens += batch.ntokens
-            log_id = "Batch train loss" if mode == "train" else "Batch val loss"
-            wandb.log({log_id: loss_node.item()})
             pbar.set_postfix(loss=loss_node.item())
 
     return total_loss / total_tokens, train_state, losses
+
+def run_epoch_TI(data_iter, model, loss_compute, optimizer, lr_scheduler, config, data_len, mode = 'train', accum_iter = 1, train_state = TrainState()):
+    total_tokens = 0
+    total_loss = 0
+    current_losses = []
+    log_id = "Batch train loss" if mode == "train" else "Batch val loss"
+    with tqdm(data_iter, total = data_len // config['batch_size'], desc=mode) as pbar:
+        for i, batch in enumerate(pbar):
+            max_len = np.max(batch.sequence_lengths) - 1
+            losses = torch.zeros(max_len).to(config['device'])
+            for traj_step in range(max_len):
+                # print(f'Calculating loss for trajectory {traj_step}.')
+                out = model.forward(batch.src, batch.trg,
+                                    batch.src_mask, batch.trg_mask, batch.embs)
+                _, loss_node = loss_compute(out, batch.trg, batch.trg_y, batch.sequence_lengths, batch.ntokens, batch.inserted)
+                # loss_node = loss_node / accum_iter
+                if mode == "train":
+                    # loss_node = Variable(loss_node, requires_grad = True)
+                    loss_node.backward()
+                    train_state.samples += batch.src.shape[0]
+                    train_state.tokens += batch.ntokens
+                    if i % accum_iter == 0:
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+                    lr_scheduler.step()
+                norm = batch.ntokens
+                if norm == 0:
+                    norm = 1
+                losses[traj_step] = loss_node.item()
+                batch.next_trajectory()
+            del batch.embs
+            loss_node_backward = torch.mean(losses)
+            if mode == "train":
+                train_state.step += 1
+                wandb.log({log_id: loss_node_backward.item(), "train_step": train_state.step})
+            else:
+                train_state.eval_step += 1
+                wandb.log({log_id: loss_node_backward.item(), "val_step": train_state.eval_step})
+            current_losses.append(loss_node_backward.item())
+            total_loss += loss_node_backward.data
+            total_tokens += batch.ntokens
+            pbar.set_postfix(loss=loss_node_backward.item())
+    return total_loss / total_tokens, train_state, current_losses
 
 def collate_fn(batch):
     words, tags, original_sentences = zip(*batch)
@@ -482,26 +651,124 @@ def collate_fn(batch):
     tags = torch.stack(tags)
     return words, tags, original_sentences
 
-def train(config):
-    with wandb.init(project="TagInsert", config=config):
-        model, model_opt, lr_scheduler, trained_epochs, train_losses, val_losses = resume_training(config)
+def get_dataloaders(data_path, config, shuffle = True):
+    train_dataset = TaggingDataset(data_path + "train_data.pth")
+    val_dataset = TaggingDataset(data_path + "val_data.pth")
+    train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=shuffle, collate_fn=collate_fn)
+    val_dataloader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=shuffle, collate_fn=collate_fn)
+    len_train = len(train_dataset)
+    len_val = len(val_dataset)
+    return train_dataloader, val_dataloader, len_train, len_val
+
+def define_wandb_metrics():
+    wandb.define_metric("train_step")
+    wandb.define_metric("Batch train loss", step_metric="train_step")
+    wandb.define_metric("val_step")
+    wandb.define_metric("Batch val loss", step_metric="val_step")
+    wandb.define_metric("epoch")
+    wandb.define_metric("train_loss", step_metric="epoch")
+    wandb.define_metric("val_loss", step_metric="epoch")
+
+def train(model_package, config, tagging, save = True):
+    model, model_opt, lr_scheduler, trained_epochs, train_losses, val_losses = model_package
+    with wandb.init(project="TagInsert", config=config, name = config['model_name']+ "_" + tagging):
         bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
-        POS_to_idx = json.load(open('data/POS/processed/POS_to_idx.json'))
-        criterion = LabelSmoothing(size=len(POS_to_idx), padding_idx=0, smoothing=0.0)
-        train_dataset = TaggingDataset("data/POS/processed/train_data.pth")
-        val_dataset = TaggingDataset("data/POS/processed/val_data.pth")
-        train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
-        val_dataloader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=True, collate_fn=collate_fn)
+        tgt_map = json.load(open(f'data/{tagging}/processed/{tagging}_to_idx.json'))
+        train_dataloader, val_dataloader, len_train, len_val = get_dataloaders(f"data/{tagging}/processed/", config)
+        if config['model_name'] == "VanillaTransformer":
+            criterion = LabelSmoothing(size=len(tgt_map), padding_idx=0, smoothing=0.0)
+        elif config['model_name'] == "TagInsert":
+            criterion = TI_Loss(config, tgt_map)
+        train_state = TrainState()
+        define_wandb_metrics()
         wandb.watch(model, log="all")
+        all_train_losses = []
+        all_val_losses = []
         for epoch in range(trained_epochs, config['epochs']):
             print(f"Epoch {epoch}")
-            epoch_data_iter = dataload(train_dataloader, config, bert_model, tokenizer, pad=0)
-            val_epoch_data_iter = dataload(val_dataloader, config, bert_model, tokenizer, pad=0)
+            epoch_data_iter = dataload(train_dataloader, config, bert_model, tokenizer, tgt_map, pad=0)
+            val_epoch_data_iter = dataload(val_dataloader, config, bert_model, tokenizer, tgt_map, pad=0)
             model.train()
-            train_losses = run_epoch(epoch_data_iter, model, SimpleLossCompute(model.generator, criterion), model_opt, lr_scheduler, config, len(train_dataset), mode = 'train')[2]
+            if config['model_name'] == "VanillaTransformer":
+                train_losses = run_epoch_VT(epoch_data_iter, model, LossCompute_VT(model.generator, criterion), model_opt, lr_scheduler, config, len_train, mode = 'train', train_state=train_state)[2]
+            elif config['model_name'] == "TagInsert":
+                train_losses = run_epoch_TI(epoch_data_iter, model, LossCompute_TI(model.generator, criterion), model_opt, lr_scheduler, config, len_train, mode = 'train', train_state=train_state)[2]
+            all_train_losses += train_losses
             with torch.no_grad():
                 model.eval()
-                val_losses = run_epoch(val_epoch_data_iter, model, SimpleLossCompute(model.generator, criterion), DummyOptimizer(),DummyScheduler(), config, len(val_dataset), mode = 'eval')[2]
-            wandb.log({"Epoch": epoch, "train_loss": np.mean(train_losses) , "val_loss": np.mean(val_losses)}, step = epoch)
+                if config['model_name'] == "VanillaTransformer":
+                    val_losses = run_epoch_VT(val_epoch_data_iter, model, LossCompute_VT(model.generator, criterion), DummyOptimizer(),DummyScheduler(), config, len_val, mode = 'eval', train_state=train_state)[2]
+                elif config['model_name'] == "TagInsert":
+                    val_losses = run_epoch_TI(val_epoch_data_iter, model, LossCompute_TI(model.generator, criterion), DummyOptimizer(),DummyScheduler(), config, len_val, mode = 'eval', train_state=train_state)[2]
+                all_val_losses += val_losses
+            wandb.log({"train_loss": np.mean(train_losses) , "val_loss": np.mean(val_losses), "epoch": epoch})
     wandb.finish()
-    return model, model_opt, lr_scheduler, train_losses, val_losses, epoch
+    if save:
+        model_name = config['model_name'] + "_" + tagging
+        save_model(model, model_opt, lr_scheduler, all_train_losses, all_val_losses, epoch, f"models/{model_name}")
+    return model
+
+@torch.no_grad()
+def evaluate(model, config, tagging):
+    model.eval()
+    if tagging == "POS":
+        idx_to_tgt = json.load(open('data/POS/processed/idx_to_POS.json'))
+        tgt_to_idx = json.load(open('data/POS/processed/POS_to_idx.json'))
+        _, val_dataloader, _, len_val = get_dataloaders("data/POS/processed/", config, shuffle = False)
+    elif tagging == "CCG":
+        idx_to_tgt = json.load(open('data/CCG/processed/idx_to_CCG.json'))
+        tgt_to_idx = json.load(open('data/CCG/processed/CCG_to_idx.json'))
+        _, val_dataloader, _, len_val = get_dataloaders("data/CCG/processed/", config, shuffle = False)
+    with wandb.init(project="TagInsert", config=config, name = f"{config['model_name']}_{tagging}_eval"):
+        bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
+        wandb.watch(model, log="all")
+        data_iter = dataload(val_dataloader, config, bert_model, tokenizer, pad=0)
+        test_predictions = []
+        test_targets = []
+        with tqdm(data_iter, total = len_val // config['batch_size'], desc="eval") as pbar:
+            for i, batch in enumerate(pbar):
+                if config['model_name'] == "VanillaTransformer":
+                    trg = greedy_decode_VT(model, batch.src, batch.src_mask, batch.embs, config['block_size'], tgt_to_idx['<START>'])
+                elif config['model_name'] == "TagInsert":
+                    trg = greedy_decode_TI(model, batch.src, batch.src_mask, batch.embs, config['block_size'], tgt_to_idx['<START>'])
+                # aligning predictions with targets while removing padding
+                trg = trg.squeeze(1)
+                trg = [[idx_to_tgt[str(idx.item())] for idx in sentence] for sentence in trg]
+                for j in range(len(trg)):
+                    sentence_len = batch.seq_lengths[j]
+                    trg[j] = trg[j][1:sentence_len+1]
+                test_predictions += trg
+                for j, idx in enumerate(batch.tgt_y):
+                    sentence = [idx_to_tgt[str(idx.item())] for idx in idx]
+                    sentence_len = batch.seq_lengths[j]
+                    test_targets.append(sentence[:sentence_len])
+
+        # calculate accuracy
+        correct = 0
+        total = 0
+        for i in range(len(test_predictions)):
+            for j in range(len(test_predictions[i])):
+                total += 1
+                if test_predictions[i][j] == test_targets[i][j]:
+                    correct += 1
+
+        accuracy = correct / total
+        print("Accuracy:", accuracy)
+        wandb.log({"Accuracy": accuracy})
+        wandb.finish()
+
+def greedy_decode_VT(model, src, src_mask, embs, max_len, start_symbol):
+        memory = model.encode(src, src_mask, embs)
+        ys = torch.ones(src.size(0), 1).fill_(start_symbol).type_as(src.data)
+        for _ in range(max_len - 1):
+            out = model.decode(
+                memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
+            )
+            prob = model.generator(out[:, -1])
+            _, next_word = torch.max(prob, dim=1)
+            next_word = next_word.view(src.size(0), 1)
+            ys = torch.cat((ys, next_word), dim=1)
+        return ys
+
+def greedy_decode_TI(model, src, src_mask, embs, max_len, start_symbol):
+        pass
