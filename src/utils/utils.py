@@ -7,6 +7,7 @@ import yaml
 from torch import nn
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import Dataset, DataLoader
+from torch.autograd import Variable
 from transformers import AutoModel, DistilBertTokenizer
 import wandb
 from src.models.VanillaTransformer import make_model_VT
@@ -17,7 +18,7 @@ def load_config(config_path):
         config = yaml.load(file, Loader=yaml.FullLoader)
     return config
 
-def prepare_data(train_file, val_file, test_file, block_size = 52):
+def prepare_data(train_file, val_file, test_file, block_size = 52, include_marker = True):
 
     # reading data from file
     sentence_tokens = []
@@ -101,7 +102,8 @@ def prepare_data(train_file, val_file, test_file, block_size = 52):
     for sentence in sentence_POS:
         sentence_idx = [POS_to_idx[tag] for tag in sentence]
         # add start token
-        sentence_idx = [POS_to_idx['<START>']] + sentence_idx
+        if include_marker:
+            sentence_idx = [POS_to_idx['<START>']] + sentence_idx
         # pad sentence to 100
         sentence_idx += [POS_to_idx['<PAD>']] * (block_size - len(sentence_idx))
         sentence_POS_idx.append(sentence_idx)
@@ -110,7 +112,8 @@ def prepare_data(train_file, val_file, test_file, block_size = 52):
     for sentence in val_sentence_POS:
         sentence_idx = [POS_to_idx[tag] for tag in sentence]
         # add start token
-        sentence_idx = [POS_to_idx['<START>']] + sentence_idx
+        if include_marker:
+            sentence_idx = [POS_to_idx['<START>']] + sentence_idx
         # pad sentence to 100
         sentence_idx += [POS_to_idx['<PAD>']] * (block_size - len(sentence_idx))
         val_sentence_POS_idx.append(sentence_idx)
@@ -119,7 +122,8 @@ def prepare_data(train_file, val_file, test_file, block_size = 52):
     for sentence in test_sentence_POS:
         sentence_idx = [POS_to_idx[tag] for tag in sentence]
         # add start token
-        sentence_idx = [POS_to_idx['<START>']] + sentence_idx
+        if include_marker:
+            sentence_idx = [POS_to_idx['<START>']] + sentence_idx
         # pad sentence to 100
         sentence_idx += [POS_to_idx['<PAD>']] * (block_size - len(sentence_idx))
         test_sentence_POS_idx.append(sentence_idx)
@@ -166,9 +170,10 @@ def prepare_data(train_file, val_file, test_file, block_size = 52):
     test_original_sentences = test_sentence_tokens
 
     # saving processed data
-    torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, 'data/POS/processed/train_data.pth')
-    torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, 'data/POS/processed/val_data.pth')
-    torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, 'data/POS/processed/test_data.pth')
+    file_name = "" if include_marker else "_taginsert"
+    torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/POS/processed/train_data{file_name}.pth')
+    torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/POS/processed/val_data{file_name}.pth')
+    torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, f'data/POS/processed/test_data{file_name}.pth')
 
     with open('data/POS/processed/word_to_idx.json', 'w') as f:
         json.dump(word_to_idx, f)
@@ -325,6 +330,10 @@ def subsequent_mask(size):
     )
     return subsequent_mask == 0
 
+def pad_mask(pad, tgt):
+    tgt_mask = (tgt != pad).unsqueeze(-2)
+    return tgt_mask
+
 class Batch_VT:
     """Object for holding a batch of data with mask during training."""
 
@@ -356,7 +365,7 @@ class Batch_TI:
         if trg is not None:
             # extracting length of each sentence
             first_pads = [torch.nonzero(trg[i] == 0, as_tuple = False)[0,0].item()-1 if torch.nonzero(trg[i] == 0, as_tuple = False).numel() > 0 else config['block_size']-1 for i in range(trg.size(0))]
-            self.sequence_lengths = first_pads
+            self.seq_lengths = first_pads
             new_trg = torch.zeros((src.size(0), config['block_size']), dtype = torch.int64).to(config['device'])
             new_trg_y = torch.zeros((src.size(0), config['block_size']), dtype = torch.int64).to(config['device']) # for each slot, the tokens yet to insert
             self.trajectory = []
@@ -372,8 +381,8 @@ class Batch_TI:
               vec = torch.full((config['block_size'],), tgt_map['<UNK>'])
               targets = torch.zeros(config['block_size']).to(config['device'])
               vec[0] = tgt_map['<START>']
-              vec[self.sequence_lengths[i]+1] = tgt_map['<END>']
-              vec[self.sequence_lengths[i]+2:] = tgt_map['<PAD>']
+              vec[self.seq_lengths[i]+1] = tgt_map['<END>']
+              vec[self.seq_lengths[i]+2:] = tgt_map['<PAD>']
               new_trg[i] = vec
               ins = 0
               for j, ix in enumerate(vec):
@@ -381,10 +390,10 @@ class Batch_TI:
                   targets[ins] = train[j-1]
                   ins+=1
               new_trg_y[i] = targets
-            self.trg = new_trg
-            self.trg_y = new_trg_y
-            self.trg_mask = self.make_std_mask(self.trg, pad)
-            nonpads = (self.trg_y != pad).data.sum()
+            self.tgt = new_trg
+            self.tgt_y = new_trg_y
+            self.tgt_mask = self.make_std_mask(self.tgt, pad)
+            nonpads = (self.tgt_y != pad).data.sum()
             self.ntokens = nonpads
 
             # print('trajectory:', self.trajectory)
@@ -392,10 +401,10 @@ class Batch_TI:
 
     def next_trajectory(self):
         for i, ins in enumerate(self.inserted):
-            if ins >= self.sequence_lengths[i]:
+            if ins >= self.seq_lengths[i]:
               continue
             next_tag_pos = self.trajectory[i][ins].item()
-            self.trg[i][next_tag_pos] = self.trg_y[i][next_tag_pos-1]
+            self.tgt[i][next_tag_pos] = self.tgt_y[i][next_tag_pos-1]
             self.inserted[i] += 1
 
     @staticmethod
@@ -528,7 +537,7 @@ class LossCompute_TI:
 
 def resume_training(model_path, config, model_name, tagging):
     try:
-        model, model_opt, lr_scheduler, logs = load_model(model_name, model_path, config)
+        model, model_opt, lr_scheduler, logs = load_model(model_name, model_path, config, tagging)
         trained_epochs = logs['epochs']
         train_losses = logs['train_losses']
         val_losses = logs['val_losses']
@@ -609,13 +618,13 @@ def run_epoch_TI(data_iter, model, loss_compute, optimizer, lr_scheduler, config
     log_id = "Batch train loss" if mode == "train" else "Batch val loss"
     with tqdm(data_iter, total = data_len // config['batch_size'], desc=mode) as pbar:
         for i, batch in enumerate(pbar):
-            max_len = np.max(batch.sequence_lengths) - 1
+            max_len = np.max(batch.seq_lengths) - 1
             losses = torch.zeros(max_len).to(config['device'])
             for traj_step in range(max_len):
                 # print(f'Calculating loss for trajectory {traj_step}.')
-                out = model.forward(batch.src, batch.trg,
-                                    batch.src_mask, batch.trg_mask, batch.embs)
-                _, loss_node = loss_compute(out, batch.trg, batch.trg_y, batch.sequence_lengths, batch.ntokens, batch.inserted)
+                out = model.forward(batch.src, batch.tgt,
+                                    batch.src_mask, batch.tgt_mask, batch.embs)
+                _, loss_node = loss_compute(out, batch.tgt, batch.tgt_y, batch.seq_lengths, batch.ntokens, batch.inserted)
                 # loss_node = loss_node / accum_iter
                 if mode == "train":
                     # loss_node = Variable(loss_node, requires_grad = True)
@@ -652,8 +661,9 @@ def collate_fn(batch):
     return words, tags, original_sentences
 
 def get_dataloaders(data_path, config, shuffle = True):
-    train_dataset = TaggingDataset(data_path + "train_data.pth")
-    val_dataset = TaggingDataset(data_path + "val_data.pth")
+    file_name = "" if config['model_name'] == "VanillaTransfomer" else "_taginsert"
+    train_dataset = TaggingDataset(data_path + f"train_data{file_name}.pth")
+    val_dataset = TaggingDataset(data_path + f"val_data{file_name}.pth")
     train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=shuffle, collate_fn=collate_fn)
     val_dataloader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=shuffle, collate_fn=collate_fn)
     len_train = len(train_dataset)
@@ -722,7 +732,7 @@ def evaluate(model, config, tagging):
     with wandb.init(project="TagInsert", config=config, name = f"{config['model_name']}_{tagging}_eval"):
         bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
         wandb.watch(model, log="all")
-        data_iter = dataload(val_dataloader, config, bert_model, tokenizer, pad=0)
+        data_iter = dataload(val_dataloader, config, bert_model, tokenizer, tgt_to_idx, pad=0)
         test_predictions = []
         test_targets = []
         with tqdm(data_iter, total = len_val // config['batch_size'], desc="eval") as pbar:
@@ -730,7 +740,7 @@ def evaluate(model, config, tagging):
                 if config['model_name'] == "VanillaTransformer":
                     trg = greedy_decode_VT(model, batch.src, batch.src_mask, batch.embs, config['block_size'], tgt_to_idx['<START>'])
                 elif config['model_name'] == "TagInsert":
-                    trg = greedy_decode_TI(model, batch.src, batch.src_mask, batch.embs, config['block_size'], tgt_to_idx['<START>'])
+                    trg, orders = greedy_decode_TI(model, batch.src, batch.src_mask, batch.embs, config['block_size'], batch.seq_lengths,  tgt_to_idx, config)
                 # aligning predictions with targets while removing padding
                 trg = trg.squeeze(1)
                 trg = [[idx_to_tgt[str(idx.item())] for idx in sentence] for sentence in trg]
@@ -746,6 +756,7 @@ def evaluate(model, config, tagging):
         # calculate accuracy
         correct = 0
         total = 0
+        print(test_predictions[0], test_targets[0])
         for i in range(len(test_predictions)):
             for j in range(len(test_predictions[i])):
                 total += 1
@@ -758,17 +769,53 @@ def evaluate(model, config, tagging):
         wandb.finish()
 
 def greedy_decode_VT(model, src, src_mask, embs, max_len, start_symbol):
-        memory = model.encode(src, src_mask, embs)
-        ys = torch.ones(src.size(0), 1).fill_(start_symbol).type_as(src.data)
-        for _ in range(max_len - 1):
-            out = model.decode(
-                memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
-            )
-            prob = model.generator(out[:, -1])
-            _, next_word = torch.max(prob, dim=1)
-            next_word = next_word.view(src.size(0), 1)
-            ys = torch.cat((ys, next_word), dim=1)
-        return ys
+    memory = model.encode(src, src_mask, embs)
+    ys = torch.ones(src.size(0), 1).fill_(start_symbol).type_as(src.data)
+    for _ in range(max_len - 1):
+        out = model.decode(
+            memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
+        )
+        prob = model.generator(out[:, -1])
+        _, next_word = torch.max(prob, dim=1)
+        next_word = next_word.view(src.size(0), 1)
+        ys = torch.cat((ys, next_word), dim=1)
+    return ys
 
-def greedy_decode_TI(model, src, src_mask, embs, max_len, start_symbol):
-        pass
+def greedy_decode_TI(model, src, src_mask, embs, max_len, seq_length, tgt_to_idx, config):
+    memory = model.encode(src, src_mask, embs)
+    batch_size = src.size(0)
+    ys = torch.full((batch_size, max_len), tgt_to_idx['<UNK>']).type_as(src.data)
+    ys[:, 0] = tgt_to_idx['<START>']
+    for i in range(batch_size):
+      ys[i][seq_length[i]+1] = tgt_to_idx['<END>']
+      ys[i][seq_length[i]+2:] = tgt_to_idx['<PAD>']
+    done_positions = torch.zeros_like(ys).to(config['device'])
+    orderings = torch.zeros((batch_size, max_len), dtype = torch.int64)
+    for pred in range(max_len):
+        out = model.decode(memory, src, embs, src_mask,
+                           Variable(ys),
+                           Variable(pad_mask(tgt_to_idx['<PAD>'], ys)))
+
+        prob = model.generator(out)
+        prob[:, 0, :] = float('-inf')
+        for i in range(batch_size):
+          prob[i, seq_length[i]+1:, :] = float('-inf')
+        for j, sent in enumerate(done_positions):
+          for i, pos in enumerate(sent):
+            if pos == 1:
+              prob[j, i, :] = float('-inf')
+
+        # argmax_indices = torch.argmax(prob, dim = 1)
+        probs = prob.to('cpu').detach().numpy()
+        result = [np.unravel_index(np.argmax(r), r.shape) for r in probs]
+        # location, tag = argmax_indices // POS_VOCAB_SIZE, argmax_indices % POS_VOCAB_SIZE
+        for i, (location, tag) in enumerate(result):
+          if torch.sum(done_positions[i]) != seq_length[i]:
+            done_positions[i, location] = 1
+            ys[i, location] = tag
+            orderings[i, location-1] = pred+1
+            # print(f'{ys}, insertion made for tag {tag.item()} at position {location}.')
+            # # print(orderings)
+            # print('---------------------------------------')
+
+    return ys, orderings
