@@ -9,6 +9,7 @@ if __name__ == '__main__':
     if tagging == "2":
         tagging = "CCG"
     if model_to_train == "1":
+        # bert encoder
         pass
     if model_to_train == "2": 
         config = load_config("config/VT_config.yaml")
@@ -19,6 +20,7 @@ if __name__ == '__main__':
         model_package = resume_training(model_path = f"models/TagInsert_{tagging}", config = config, model_name = "TI", tagging=tagging)
         model = train(model_package, config, tagging, save = True)
     if model_to_train == "4":
+        # TagInsert L2R
         pass
 
 

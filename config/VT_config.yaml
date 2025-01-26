@@ -1,5 +1,5 @@
 model_name: "VanillaTransformer"
-bert_model: "distilbert/distilbert-base-cased"
+bert_model: "bert-base-cased"
 device: "cuda"
 lr: 0.5
 betas: [0.9, 0.98]
@@ -7,8 +7,8 @@ eps: 0.000000001
 warmup: 400
 n_stacks: 8
 n_heads: 8
-batch_size: 8
+batch_size: 64
 epochs: 3
-block_size: 52
-bert_block_size: 100
+block_size: 102
+bert_block_size: 200
 hidden_size: 768

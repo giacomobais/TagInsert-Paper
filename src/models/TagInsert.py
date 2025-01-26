@@ -4,7 +4,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import json
-from src.models.VanillaTransformer import MultiHeadedAttention, PositionwiseFeedForward, PositionalEncoding, Embeddings, Encoder, EncoderLayer, Decoder, DecoderLayer, LayerNorm, POS_Embeddings
+from src.models.VanillaTransformer import MultiHeadedAttention, PositionwiseFeedForward, PositionalEncoding, Embeddings, Encoder, EncoderLayer, Decoder, DecoderLayer, POS_Embeddings
 
 class TagInsert(nn.Module):
     """

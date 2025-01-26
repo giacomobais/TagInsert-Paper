@@ -3,22 +3,25 @@ import torch
 import numpy as np
 import json
 from tqdm import tqdm
+import os
+from tempfile import NamedTemporaryFile
 import yaml
 from torch import nn
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
-from transformers import AutoModel, DistilBertTokenizer
+from transformers import AutoModel, AutoTokenizer
 import wandb
 from src.models.VanillaTransformer import make_model_VT
 from src.models.TagInsert import make_model_TI
+import pandas as pd
 
 def load_config(config_path):
     with open(config_path) as file:
         config = yaml.load(file, Loader=yaml.FullLoader)
     return config
 
-def prepare_data(train_file, val_file, test_file, block_size = 52, include_marker = True):
+def prepare_data(train_file, val_file, test_file, block_size = 52, keep_proportion = 1):
 
     # reading data from file
     sentence_tokens = []
@@ -102,8 +105,7 @@ def prepare_data(train_file, val_file, test_file, block_size = 52, include_marke
     for sentence in sentence_POS:
         sentence_idx = [POS_to_idx[tag] for tag in sentence]
         # add start token
-        if include_marker:
-            sentence_idx = [POS_to_idx['<START>']] + sentence_idx
+        sentence_idx = [POS_to_idx['<START>']] + sentence_idx
         # pad sentence to 100
         sentence_idx += [POS_to_idx['<PAD>']] * (block_size - len(sentence_idx))
         sentence_POS_idx.append(sentence_idx)
@@ -112,8 +114,7 @@ def prepare_data(train_file, val_file, test_file, block_size = 52, include_marke
     for sentence in val_sentence_POS:
         sentence_idx = [POS_to_idx[tag] for tag in sentence]
         # add start token
-        if include_marker:
-            sentence_idx = [POS_to_idx['<START>']] + sentence_idx
+        sentence_idx = [POS_to_idx['<START>']] + sentence_idx
         # pad sentence to 100
         sentence_idx += [POS_to_idx['<PAD>']] * (block_size - len(sentence_idx))
         val_sentence_POS_idx.append(sentence_idx)
@@ -122,8 +123,7 @@ def prepare_data(train_file, val_file, test_file, block_size = 52, include_marke
     for sentence in test_sentence_POS:
         sentence_idx = [POS_to_idx[tag] for tag in sentence]
         # add start token
-        if include_marker:
-            sentence_idx = [POS_to_idx['<START>']] + sentence_idx
+        sentence_idx = [POS_to_idx['<START>']] + sentence_idx
         # pad sentence to 100
         sentence_idx += [POS_to_idx['<PAD>']] * (block_size - len(sentence_idx))
         test_sentence_POS_idx.append(sentence_idx)
@@ -158,6 +158,13 @@ def prepare_data(train_file, val_file, test_file, block_size = 52, include_marke
         sentence_idx += [word_to_idx['<PAD>']] * (block_size - len(sentence_idx))
         test_sentence_tokens_idx.append(sentence_idx)
 
+    # randomly sample a proportion of the data
+    if keep_proportion != 1:
+        n = len(sentence_tokens_idx)
+        indices = np.random.choice(n, int(n*keep_proportion), replace=False)
+        sentence_tokens_idx = [sentence_tokens_idx[i] for i in indices]
+        sentence_POS_idx = [sentence_POS_idx[i] for i in indices]
+
     # renaming for handiness
     train_words = sentence_tokens_idx
     train_tags = sentence_POS_idx
@@ -170,10 +177,9 @@ def prepare_data(train_file, val_file, test_file, block_size = 52, include_marke
     test_original_sentences = test_sentence_tokens
 
     # saving processed data
-    file_name = "" if include_marker else "_taginsert"
-    torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/POS/processed/train_data{file_name}.pth')
-    torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/POS/processed/val_data{file_name}.pth')
-    torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, f'data/POS/processed/test_data{file_name}.pth')
+    torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/POS/processed/train_data.pth')
+    torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/POS/processed/val_data.pth')
+    torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, f'data/POS/processed/test_data.pth')
 
     with open('data/POS/processed/word_to_idx.json', 'w') as f:
         json.dump(word_to_idx, f)
@@ -208,10 +214,10 @@ class TaggingDataset(Dataset):
 def load_BERT_encoder(model_name, device = 'cuda'):
     model = AutoModel.from_pretrained(model_name, output_hidden_states = True)
     model = model.to(device)
-    tokenizer = DistilBertTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, tokenizer
 
-def create_mapping(sentence, tokens_tensor, tokenizer, cased = False, subword_manage = 'prefix'):
+def create_mapping(sentence, tokens_tensor, tokenizer, cased = False, subword_manage = 'suffix'):
     mapping = [None] # for the [CLS] token
     detokenized_index = 1 # for the [CLS] token
     detokenized_sentence = tokenizer.convert_ids_to_tokens(tokens_tensor)
@@ -254,14 +260,14 @@ def extract_BERT_embs(sentences, bert_model, tokenizer, config):
     tokens_tensor = [tokenizer(text, padding="max_length", truncation=True, max_length=config['bert_block_size'], return_tensors="pt") for text in marked_text]
     attention_mask = torch.stack([t['attention_mask'] for t in tokens_tensor])
     tokens_tensor = torch.stack([t['input_ids'] for t in tokens_tensor]).squeeze(1)
-    mappings = [create_mapping(sentence, tokens_tensor[i], tokenizer, cased = True, subword_manage='prefix') for i, sentence in enumerate(sentences)]
+    mappings = [create_mapping(sentence, tokens_tensor[i], tokenizer, cased = True, subword_manage='suffix') for i, sentence in enumerate(sentences)]
     tokens_tensor = tokens_tensor.to(device)
     attention_mask = attention_mask.to(device)
     with torch.no_grad():
         bert_model = bert_model.to(device)
         outputs = bert_model(tokens_tensor, attention_mask = attention_mask)
         bert_model = bert_model.to('cpu')
-        hidden_states = outputs[1]
+        hidden_states = outputs.hidden_states
         hidden_states = torch.stack(hidden_states, dim=0)
         hidden_states = hidden_states.to('cpu')
         hidden_states = hidden_states.permute(1,2,0,3)
@@ -342,7 +348,7 @@ class Batch_VT:
         self.src_mask = (src != pad).unsqueeze(-2)
         self.embs = embs
         if tgt is not None:
-            self.seq_lengths = [torch.nonzero(tgt[i] == 0, as_tuple = False)[0,0].item()-1 if torch.nonzero(tgt[i] == 0, as_tuple = False).numel() > 0 else 51 for i in range(tgt.size(0))]
+            self.seq_lengths = [torch.nonzero(tgt[i] == 0, as_tuple = False)[0,0].item()-1 if torch.nonzero(tgt[i] == 0, as_tuple = False).numel() > 0 else src.size(1)-1 for i in range(tgt.size(0))]
             self.tgt = tgt[:, :-1]
             self.tgt_y = tgt[:, 1:]
             self.tgt_mask = self.make_std_mask(self.tgt, pad)
@@ -364,8 +370,10 @@ class Batch_TI:
         self.src_mask = (src != pad).unsqueeze(-2)
         if trg is not None:
             # extracting length of each sentence
-            first_pads = [torch.nonzero(trg[i] == 0, as_tuple = False)[0,0].item()-1 if torch.nonzero(trg[i] == 0, as_tuple = False).numel() > 0 else config['block_size']-1 for i in range(trg.size(0))]
+            first_pads = [torch.nonzero(trg[i] == 0, as_tuple = False)[0,0].item()-1 if torch.nonzero(trg[i] == 0, as_tuple = False).numel() > 0 else config['block_size']-2 for i in range(trg.size(0))]
             self.seq_lengths = first_pads
+            # this is now correct, I have to change so that this considers the start token, so there is going to be one more for length to subtract and I have to build the trg tensor better
+            # print(self.seq_lengths, 'seq_lengths', trg, self.src, self.src.size(1))
             new_trg = torch.zeros((src.size(0), config['block_size']), dtype = torch.int64).to(config['device'])
             new_trg_y = torch.zeros((src.size(0), config['block_size']), dtype = torch.int64).to(config['device']) # for each slot, the tokens yet to insert
             self.trajectory = []
@@ -387,7 +395,7 @@ class Batch_TI:
               ins = 0
               for j, ix in enumerate(vec):
                 if ix == tgt_map['<UNK>']:
-                  targets[ins] = train[j-1]
+                  targets[ins] = train[j]
                   ins+=1
               new_trg_y[i] = targets
             self.tgt = new_trg
@@ -395,6 +403,7 @@ class Batch_TI:
             self.tgt_mask = self.make_std_mask(self.tgt, pad)
             nonpads = (self.tgt_y != pad).data.sum()
             self.ntokens = nonpads
+            # print(self.tgt, self.tgt_y, self.trajectory)
 
             # print('trajectory:', self.trajectory)
             self.embs = embs
@@ -406,6 +415,7 @@ class Batch_TI:
             next_tag_pos = self.trajectory[i][ins].item()
             self.tgt[i][next_tag_pos] = self.tgt_y[i][next_tag_pos-1]
             self.inserted[i] += 1
+        #print(f"Next trajectory: {self.tgt}")
 
     @staticmethod
     def make_std_mask(tgt, pad):
@@ -576,7 +586,7 @@ def dataload(data_loader, config, bert_model, tokenizer, tgt_map, pad=0):
         tgt = yb.to(config['device'])
         embs = embs.to(config['device'])
         if config['model_name'] == "VanillaTransformer":
-            yield Batch_VT(src, tgt, pad=pad)
+            yield Batch_VT(src, tgt, embs, pad=pad)
         elif config['model_name'] == "TagInsert":
             yield Batch_TI(config, tgt_map, src, tgt, embs, pad=pad)
 
@@ -661,9 +671,8 @@ def collate_fn(batch):
     return words, tags, original_sentences
 
 def get_dataloaders(data_path, config, shuffle = True):
-    file_name = "" if config['model_name'] == "VanillaTransfomer" else "_taginsert"
-    train_dataset = TaggingDataset(data_path + f"train_data{file_name}.pth")
-    val_dataset = TaggingDataset(data_path + f"val_data{file_name}.pth")
+    train_dataset = TaggingDataset(data_path + f"train_data.pth")
+    val_dataset = TaggingDataset(data_path + f"val_data.pth")
     train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=shuffle, collate_fn=collate_fn)
     val_dataloader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=shuffle, collate_fn=collate_fn)
     len_train = len(train_dataset)
@@ -718,55 +727,94 @@ def train(model_package, config, tagging, save = True):
         save_model(model, model_opt, lr_scheduler, all_train_losses, all_val_losses, epoch, f"models/{model_name}")
     return model
 
+
 @torch.no_grad()
 def evaluate(model, config, tagging):
     model.eval()
     if tagging == "POS":
         idx_to_tgt = json.load(open('data/POS/processed/idx_to_POS.json'))
         tgt_to_idx = json.load(open('data/POS/processed/POS_to_idx.json'))
-        _, val_dataloader, _, len_val = get_dataloaders("data/POS/processed/", config, shuffle = False)
+        idx_to_word = json.load(open('data/POS/processed/idx_to_word.json'))
+        _, val_dataloader, _, len_val = get_dataloaders("data/POS/processed/", config, shuffle=False)
     elif tagging == "CCG":
         idx_to_tgt = json.load(open('data/CCG/processed/idx_to_CCG.json'))
         tgt_to_idx = json.load(open('data/CCG/processed/CCG_to_idx.json'))
-        _, val_dataloader, _, len_val = get_dataloaders("data/CCG/processed/", config, shuffle = False)
-    with wandb.init(project="TagInsert", config=config, name = f"{config['model_name']}_{tagging}_eval"):
+        idx_to_word = json.load(open('data/CCG/processed/idx_to_word.json'))
+        _, val_dataloader, _, len_val = get_dataloaders("data/CCG/processed/", config, shuffle=False)
+
+    with wandb.init(project="TagInsert", config=config, name=f"{config['model_name']}_{tagging}_eval"):
         bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
         wandb.watch(model, log="all")
         data_iter = dataload(val_dataloader, config, bert_model, tokenizer, tgt_to_idx, pad=0)
+        
         test_predictions = []
         test_targets = []
-        with tqdm(data_iter, total = len_val // config['batch_size'], desc="eval") as pbar:
+        test_words = []
+
+        # Iterate through the dataset
+        with tqdm(data_iter, total=len_val // config['batch_size'], desc="eval") as pbar:
             for i, batch in enumerate(pbar):
                 if config['model_name'] == "VanillaTransformer":
                     trg = greedy_decode_VT(model, batch.src, batch.src_mask, batch.embs, config['block_size'], tgt_to_idx['<START>'])
                 elif config['model_name'] == "TagInsert":
-                    trg, orders = greedy_decode_TI(model, batch.src, batch.src_mask, batch.embs, config['block_size'], batch.seq_lengths,  tgt_to_idx, config)
-                # aligning predictions with targets while removing padding
+                    trg, orders = greedy_decode_TI(model, batch.src, batch.src_mask, batch.embs, config['block_size'], batch.seq_lengths, tgt_to_idx, config)
+                
                 trg = trg.squeeze(1)
                 trg = [[idx_to_tgt[str(idx.item())] for idx in sentence] for sentence in trg]
+                
                 for j in range(len(trg)):
                     sentence_len = batch.seq_lengths[j]
                     trg[j] = trg[j][1:sentence_len+1]
+                
                 test_predictions += trg
+                test_words += [[idx_to_word[str(idx.item())] for idx in sentence] for sentence in batch.src]
                 for j, idx in enumerate(batch.tgt_y):
                     sentence = [idx_to_tgt[str(idx.item())] for idx in idx]
                     sentence_len = batch.seq_lengths[j]
                     test_targets.append(sentence[:sentence_len])
 
-        # calculate accuracy
+        # Calculate sentence-level accuracy and prepare DataFrame
+        data = []
         correct = 0
         total = 0
-        print(test_predictions[0], test_targets[0])
-        for i in range(len(test_predictions)):
-            for j in range(len(test_predictions[i])):
-                total += 1
-                if test_predictions[i][j] == test_targets[i][j]:
-                    correct += 1
 
-        accuracy = correct / total
-        print("Accuracy:", accuracy)
-        wandb.log({"Accuracy": accuracy})
+        for words, gold, pred in zip(test_words, test_targets, test_predictions):
+            # Calculate sentence-level accuracy
+            sentence_correct = sum(1 for g, p in zip(gold, pred) if g == p)
+            sentence_total = len(gold)
+            sentence_accuracy = sentence_correct / sentence_total
+
+            # Accumulate overall accuracy stats
+            correct += sentence_correct
+            total += sentence_total
+
+            # Add row to data
+            data.append({
+                "Words": " ".join(words),
+                "Gold": " ".join(gold),
+                "Predicted": " ".join(pred),
+                "Accuracy": sentence_accuracy
+            })
+
+        # Create a DataFrame
+        df = pd.DataFrame(data)
+
+        # Save DataFrame to a temporary file
+        with NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_file:
+            df.to_excel(tmp_file.name, index=False)
+            artifact = wandb.Artifact(name="predictions", type="dataset")
+            artifact.add_file(tmp_file.name)
+            wandb.log_artifact(artifact)  # Log the artifact
+            os.unlink(tmp_file.name)  # Delete the local file
+
+        # Calculate overall accuracy
+        overall_accuracy = correct / total
+        print("Overall Accuracy:", overall_accuracy)
+
+        # Log overall accuracy and finish wandb
+        wandb.log({"Accuracy": overall_accuracy})
         wandb.finish()
+
 
 def greedy_decode_VT(model, src, src_mask, embs, max_len, start_symbol):
     memory = model.encode(src, src_mask, embs)

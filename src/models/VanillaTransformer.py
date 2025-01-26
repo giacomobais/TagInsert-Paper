@@ -227,7 +227,7 @@ class POS_Embeddings(nn.Module):
 class PositionalEncoding(nn.Module):
     "Implement the PE function."
 
-    def __init__(self, d_model, dropout, max_len=100):
+    def __init__(self, d_model, dropout, max_len=105):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
