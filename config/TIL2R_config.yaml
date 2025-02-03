@@ -1,4 +1,4 @@
-model_name: "VanillaTransformer"
+model_name: "TagInsertL2R"
 bert_model: "bert-base-cased"
 device: "cuda"
 lr: 0.5
@@ -7,10 +7,10 @@ eps: 0.000000001
 warmup: 400
 n_stacks: 8
 n_heads: 8
-batch_size: 64
+batch_size: 8
 epochs: 5
 block_size: 102
 bert_block_size: 200
 hidden_size: 768
-data_proportion: 1
+data_proportion: 0.25
 embedding_strategy: "prefix"

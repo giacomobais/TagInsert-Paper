@@ -13,15 +13,16 @@ if __name__ == '__main__':
         pass
     if model_to_train == "2": 
         config = load_config("config/VT_config.yaml")
-        model_package = resume_training(model_path = f"models/VanillaTransformer_{tagging}", config = config, model_name = "VT", tagging=tagging)
+        model_package = resume_training(model_path = f"models/VanillaTransformer_{tagging}_{str(config['data_proportion'])}", config = config, model_name = "VT", tagging=tagging)
         model = train(model_package, config, tagging, save = True)
     if model_to_train == "3":
         config = load_config("config/TI_config.yaml")
-        model_package = resume_training(model_path = f"models/TagInsert_{tagging}", config = config, model_name = "TI", tagging=tagging)
+        model_package = resume_training(model_path = f"models/TagInsert_{tagging}_{str(config['data_proportion'])}", config = config, model_name = "TI", tagging=tagging)
         model = train(model_package, config, tagging, save = True)
     if model_to_train == "4":
-        # TagInsert L2R
-        pass
+        config = load_config("config/TIL2R_config.yaml")
+        model_package = resume_training(model_path = f"models/TagInsertL2R_{tagging}_{str(config['data_proportion'])}", config = config, model_name = "TIL2R", tagging=tagging)
+        model = train(model_package, config, tagging, save = True)
 
 
     

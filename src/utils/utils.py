@@ -3,8 +3,6 @@ import torch
 import numpy as np
 import json
 from tqdm import tqdm
-import os
-from tempfile import NamedTemporaryFile
 import yaml
 from torch import nn
 from torch.optim.lr_scheduler import LambdaLR
@@ -14,7 +12,10 @@ from transformers import AutoModel, AutoTokenizer
 import wandb
 from src.models.VanillaTransformer import make_model_VT
 from src.models.TagInsert import make_model_TI
+from src.models.TagInsertL2R import make_model_TIL2R
 import pandas as pd
+
+PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%"}
 
 def load_config(config_path):
     with open(config_path) as file:
@@ -159,11 +160,13 @@ def prepare_data(train_file, val_file, test_file, block_size = 52, keep_proporti
         test_sentence_tokens_idx.append(sentence_idx)
 
     # randomly sample a proportion of the data
+    if keep_proportion == 1.0:
+        keep_proportion = 1
     if keep_proportion != 1:
-        n = len(sentence_tokens_idx)
-        indices = np.random.choice(n, int(n*keep_proportion), replace=False)
-        sentence_tokens_idx = [sentence_tokens_idx[i] for i in indices]
-        sentence_POS_idx = [sentence_POS_idx[i] for i in indices]
+        sentences_to_keep = np.random.choice(len(sentence_tokens_idx), int(len(sentence_tokens_idx)*keep_proportion), replace = False)
+        sentence_tokens_idx = [sentence_tokens_idx[i] for i in sentences_to_keep]
+        sentence_POS_idx = [sentence_POS_idx[i] for i in sentences_to_keep]
+        sentence_tokens = [sentence_tokens[i] for i in sentences_to_keep]
 
     # renaming for handiness
     train_words = sentence_tokens_idx
@@ -177,17 +180,18 @@ def prepare_data(train_file, val_file, test_file, block_size = 52, keep_proporti
     test_original_sentences = test_sentence_tokens
 
     # saving processed data
-    torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/POS/processed/train_data.pth')
-    torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/POS/processed/val_data.pth')
-    torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, f'data/POS/processed/test_data.pth')
+    prop_path = PROP_CONVERTER[keep_proportion]
+    torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/POS/processed/{prop_path}/train_data.pth')
+    torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/POS/processed/{prop_path}/val_data.pth')
+    torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, f'data/POS/processed/{prop_path}/test_data.pth')
 
-    with open('data/POS/processed/word_to_idx.json', 'w') as f:
+    with open(f'data/POS/processed/{prop_path}/word_to_idx.json', 'w') as f:
         json.dump(word_to_idx, f)
-    with open('data/POS/processed/idx_to_word.json', 'w') as f:
+    with open(f'data/POS/processed/{prop_path}/idx_to_word.json', 'w') as f:
         json.dump(idx_to_word, f)
-    with open('data/POS/processed/POS_to_idx.json', 'w') as f:
+    with open(f'data/POS/processed/{prop_path}/POS_to_idx.json', 'w') as f:
         json.dump(POS_to_idx, f)
-    with open('data/POS/processed/idx_to_POS.json', 'w') as f:
+    with open(f'data/POS/processed/{prop_path}/idx_to_POS.json', 'w') as f:
         json.dump(idx_to_POS, f)
 
 class TaggingDataset(Dataset):
@@ -217,7 +221,7 @@ def load_BERT_encoder(model_name, device = 'cuda'):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, tokenizer
 
-def create_mapping(sentence, tokens_tensor, tokenizer, cased = False, subword_manage = 'suffix'):
+def create_mapping(sentence, tokens_tensor, tokenizer, cased = False, subword_manage = 'prefix'):
     mapping = [None] # for the [CLS] token
     detokenized_index = 1 # for the [CLS] token
     detokenized_sentence = tokenizer.convert_ids_to_tokens(tokens_tensor)
@@ -260,7 +264,7 @@ def extract_BERT_embs(sentences, bert_model, tokenizer, config):
     tokens_tensor = [tokenizer(text, padding="max_length", truncation=True, max_length=config['bert_block_size'], return_tensors="pt") for text in marked_text]
     attention_mask = torch.stack([t['attention_mask'] for t in tokens_tensor])
     tokens_tensor = torch.stack([t['input_ids'] for t in tokens_tensor]).squeeze(1)
-    mappings = [create_mapping(sentence, tokens_tensor[i], tokenizer, cased = True, subword_manage='suffix') for i, sentence in enumerate(sentences)]
+    mappings = [create_mapping(sentence, tokens_tensor[i], tokenizer, cased = True, subword_manage=config['embedding_strategy']) for i, sentence in enumerate(sentences)]
     tokens_tensor = tokens_tensor.to(device)
     attention_mask = attention_mask.to(device)
     with torch.no_grad():
@@ -315,6 +319,8 @@ def load_model(model_name, path, config, tagging):
         model = make_model_VT(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
     elif model_name == "TI":
         model = make_model_TI(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+    elif model_name == "TIL2R":
+        model = make_model_TIL2R(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
     model = model.to(config['device'])
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], betas=(config['betas'][0], config['betas'][1]), eps=config['eps']) 
     lr_scheduler = LambdaLR(optimizer=optimizer,lr_lambda=lambda step: rate(step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=config['warmup']),)
@@ -353,6 +359,7 @@ class Batch_VT:
             self.tgt_y = tgt[:, 1:]
             self.tgt_mask = self.make_std_mask(self.tgt, pad)
             self.ntokens = (self.tgt_y != pad).data.sum()
+        print(self.src[0], self.tgt[0], self.tgt_y[0])
 
     @staticmethod
     def make_std_mask(tgt, pad):
@@ -557,6 +564,8 @@ def resume_training(model_path, config, model_name, tagging):
             model = make_model_VT(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
         elif model_name == "TI":
             model = make_model_TI(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+        elif model_name == "TIL2R":
+            model = make_model_TIL2R(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
         model_opt = torch.optim.Adam(model.parameters(), lr=config['lr'], betas=(config['betas'][0], config['betas'][1]), eps=config['eps']) 
         lr_scheduler = LambdaLR(optimizer=model_opt,lr_lambda=lambda step: rate(step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=config['warmup']),)
         trained_epochs = 0
@@ -585,7 +594,7 @@ def dataload(data_loader, config, bert_model, tokenizer, tgt_map, pad=0):
         src = xb.to(config['device'])
         tgt = yb.to(config['device'])
         embs = embs.to(config['device'])
-        if config['model_name'] == "VanillaTransformer":
+        if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
             yield Batch_VT(src, tgt, embs, pad=pad)
         elif config['model_name'] == "TagInsert":
             yield Batch_TI(config, tgt_map, src, tgt, embs, pad=pad)
@@ -690,11 +699,21 @@ def define_wandb_metrics():
 
 def train(model_package, config, tagging, save = True):
     model, model_opt, lr_scheduler, trained_epochs, train_losses, val_losses = model_package
-    with wandb.init(project="TagInsert", config=config, name = config['model_name']+ "_" + tagging):
+    if config['model_name'] == "VanillaTransformer":
+        run_model_name = "VT"
+    elif config['model_name'] == "TagInsert":
+        run_model_name = "TI"
+    elif config['model_name'] == "BERT":
+        run_model_name = "BE"
+    elif config['model_name'] == "TagInsertL2R":
+        run_model_name = "TIL2R"
+    run_name = run_model_name + "_" + tagging + "_" + str(config['data_proportion'])
+    with wandb.init(project="TagInsert", config=config, name = run_name):
         bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
-        tgt_map = json.load(open(f'data/{tagging}/processed/{tagging}_to_idx.json'))
-        train_dataloader, val_dataloader, len_train, len_val = get_dataloaders(f"data/{tagging}/processed/", config)
-        if config['model_name'] == "VanillaTransformer":
+        prop_path = PROP_CONVERTER[config['data_proportion']]
+        tgt_map = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
+        train_dataloader, val_dataloader, len_train, len_val = get_dataloaders(f"data/{tagging}/processed/{prop_path}/", config)
+        if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
             criterion = LabelSmoothing(size=len(tgt_map), padding_idx=0, smoothing=0.0)
         elif config['model_name'] == "TagInsert":
             criterion = TI_Loss(config, tgt_map)
@@ -708,14 +727,14 @@ def train(model_package, config, tagging, save = True):
             epoch_data_iter = dataload(train_dataloader, config, bert_model, tokenizer, tgt_map, pad=0)
             val_epoch_data_iter = dataload(val_dataloader, config, bert_model, tokenizer, tgt_map, pad=0)
             model.train()
-            if config['model_name'] == "VanillaTransformer":
+            if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
                 train_losses = run_epoch_VT(epoch_data_iter, model, LossCompute_VT(model.generator, criterion), model_opt, lr_scheduler, config, len_train, mode = 'train', train_state=train_state)[2]
             elif config['model_name'] == "TagInsert":
                 train_losses = run_epoch_TI(epoch_data_iter, model, LossCompute_TI(model.generator, criterion), model_opt, lr_scheduler, config, len_train, mode = 'train', train_state=train_state)[2]
             all_train_losses += train_losses
             with torch.no_grad():
                 model.eval()
-                if config['model_name'] == "VanillaTransformer":
+                if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
                     val_losses = run_epoch_VT(val_epoch_data_iter, model, LossCompute_VT(model.generator, criterion), DummyOptimizer(),DummyScheduler(), config, len_val, mode = 'eval', train_state=train_state)[2]
                 elif config['model_name'] == "TagInsert":
                     val_losses = run_epoch_TI(val_epoch_data_iter, model, LossCompute_TI(model.generator, criterion), DummyOptimizer(),DummyScheduler(), config, len_val, mode = 'eval', train_state=train_state)[2]
@@ -723,7 +742,7 @@ def train(model_package, config, tagging, save = True):
             wandb.log({"train_loss": np.mean(train_losses) , "val_loss": np.mean(val_losses), "epoch": epoch})
     wandb.finish()
     if save:
-        model_name = config['model_name'] + "_" + tagging
+        model_name = config['model_name'] + "_" + tagging + "_" + str(config['data_proportion'])
         save_model(model, model_opt, lr_scheduler, all_train_losses, all_val_losses, epoch, f"models/{model_name}")
     return model
 
@@ -731,18 +750,27 @@ def train(model_package, config, tagging, save = True):
 @torch.no_grad()
 def evaluate(model, config, tagging):
     model.eval()
+    prop_path = PROP_CONVERTER[config['data_proportion']]
     if tagging == "POS":
-        idx_to_tgt = json.load(open('data/POS/processed/idx_to_POS.json'))
-        tgt_to_idx = json.load(open('data/POS/processed/POS_to_idx.json'))
-        idx_to_word = json.load(open('data/POS/processed/idx_to_word.json'))
-        _, val_dataloader, _, len_val = get_dataloaders("data/POS/processed/", config, shuffle=False)
+        idx_to_tgt = json.load(open(f'data/POS/processed/{prop_path}/idx_to_POS.json'))
+        tgt_to_idx = json.load(open(f'data/POS/processed/{prop_path}/POS_to_idx.json'))
+        idx_to_word = json.load(open(f'data/POS/processed/{prop_path}/idx_to_word.json'))
+        _, val_dataloader, _, len_val = get_dataloaders(f"data/POS/processed/{prop_path}/", config, shuffle=False)
     elif tagging == "CCG":
-        idx_to_tgt = json.load(open('data/CCG/processed/idx_to_CCG.json'))
-        tgt_to_idx = json.load(open('data/CCG/processed/CCG_to_idx.json'))
-        idx_to_word = json.load(open('data/CCG/processed/idx_to_word.json'))
-        _, val_dataloader, _, len_val = get_dataloaders("data/CCG/processed/", config, shuffle=False)
-
-    with wandb.init(project="TagInsert", config=config, name=f"{config['model_name']}_{tagging}_eval"):
+        idx_to_tgt = json.load(open(f'data/CCG/processed/{prop_path}/idx_to_CCG.json'))
+        tgt_to_idx = json.load(open(f'data/CCG/processed/{prop_path}/CCG_to_idx.json'))
+        idx_to_word = json.load(open(f'data/CCG/processed/{prop_path}/idx_to_word.json'))
+        _, val_dataloader, _, len_val = get_dataloaders(f"data/CCG/processed/{prop_path}/", config, shuffle=False)
+    if config['model_name'] == "VanillaTransformer":
+        run_model_name = "VT"
+    elif config['model_name'] == "TagInsert":
+        run_model_name = "TI"
+    elif config['model_name'] == "BERT":
+        run_model_name = "BE"
+    elif config['model_name'] == "TagInsertL2R":
+        run_model_name = "TIL2R"
+    run_name = run_model_name + "_" + tagging + "_" + str(config['data_proportion']) + "_eval"
+    with wandb.init(project="TagInsert", config=config, name=run_name):
         bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
         wandb.watch(model, log="all")
         data_iter = dataload(val_dataloader, config, bert_model, tokenizer, tgt_to_idx, pad=0)
@@ -754,7 +782,7 @@ def evaluate(model, config, tagging):
         # Iterate through the dataset
         with tqdm(data_iter, total=len_val // config['batch_size'], desc="eval") as pbar:
             for i, batch in enumerate(pbar):
-                if config['model_name'] == "VanillaTransformer":
+                if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
                     trg = greedy_decode_VT(model, batch.src, batch.src_mask, batch.embs, config['block_size'], tgt_to_idx['<START>'])
                 elif config['model_name'] == "TagInsert":
                     trg, orders = greedy_decode_TI(model, batch.src, batch.src_mask, batch.embs, config['block_size'], batch.seq_lengths, tgt_to_idx, config)
@@ -799,13 +827,7 @@ def evaluate(model, config, tagging):
         # Create a DataFrame
         df = pd.DataFrame(data)
 
-        # Save DataFrame to a temporary file
-        with NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_file:
-            df.to_excel(tmp_file.name, index=False)
-            artifact = wandb.Artifact(name="predictions", type="dataset")
-            artifact.add_file(tmp_file.name)
-            wandb.log_artifact(artifact)  # Log the artifact
-            os.unlink(tmp_file.name)  # Delete the local file
+        df.to_excel("predictions.xlsx", index=False)
 
         # Calculate overall accuracy
         overall_accuracy = correct / total
@@ -820,6 +842,7 @@ def greedy_decode_VT(model, src, src_mask, embs, max_len, start_symbol):
     memory = model.encode(src, src_mask, embs)
     ys = torch.ones(src.size(0), 1).fill_(start_symbol).type_as(src.data)
     for _ in range(max_len - 1):
+        # TODO: change the loop
         out = model.decode(
             memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
         )

@@ -1,6 +1,4 @@
 import copy
-import math
-import torch
 from torch import nn
 import torch.nn.functional as F
 import json
@@ -30,16 +28,16 @@ class TagInsert(nn.Module):
       return out
 
     def decode(self, memory, src, embs, src_mask, tgt, tgt_mask):
-      src_emb = self.src_embed(embs)
-      emb = self.tgt_embed(tgt)
-      emb = self.addsrc(emb, src_emb)
-      out = self.decoder(emb, memory, src_mask, tgt_mask)
-      # print(out.shape)
-      return out
+        src_emb = self.src_embed(embs)
+        emb = self.tgt_embed(tgt)
+        emb = self.addsrc(emb, src_emb)
+        out = self.decoder(emb, memory, src_mask, tgt_mask)
+        # print(out.shape)
+        return out
 
     def addsrc(self, emb, src_emb):
-      emb[:, 1:] += src_emb[:, :-1]
-      return emb
+        emb[:, 1:] += src_emb[:, :-1]
+        return emb
     
 class GeneratorTagInsert(nn.Module):
     "Define standard linear + softmax generation step."
@@ -48,8 +46,8 @@ class GeneratorTagInsert(nn.Module):
         self.proj = nn.Linear(d_model, vocab)
 
     def forward(self, x):
-      out = F.softmax(self.proj(x), dim=-1)
-      return out
+        out = F.softmax(self.proj(x), dim=-1)
+        return out
 
 def make_model_TI(tagging, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
     "Helper: Construct a model from hyperparameters."
@@ -58,14 +56,14 @@ def make_model_TI(tagging, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
     ff = PositionwiseFeedForward(d_model, d_ff, dropout)
     position = PositionalEncoding(d_model, dropout)
     if tagging == "POS":
-        word_to_idx = json.load(open("data/POS/processed/word_to_idx.json"))
+        word_to_idx = json.load(open("data/POS/processed/100%/word_to_idx.json"))
         src_vocab = len(word_to_idx)
-        POS_to_idx = json.load(open("data/POS/processed/POS_to_idx.json"))
+        POS_to_idx = json.load(open("data/POS/processed/100%/POS_to_idx.json"))
         tgt_vocab = len(POS_to_idx)
     elif tagging == "CCG":
-        word_to_idx = json.load(open("data/CCG/processed/word_to_idx.json"))
+        word_to_idx = json.load(open("data/CCG/processed/100%/word_to_idx.json"))
         src_vocab = len(word_to_idx)
-        CCG_to_idx = json.load(open("data/CCG/processed/CCG_to_idx.json"))
+        CCG_to_idx = json.load(open("data/CCG/processed/100%/CCG_to_idx.json"))
         tgt_vocab = len(CCG_to_idx)
     model = TagInsert(
         Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),

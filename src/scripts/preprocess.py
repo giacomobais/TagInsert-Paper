@@ -8,5 +8,5 @@ if __name__ == '__main__':
     train_file = "data/POS/raw/new_sec_01-22.tagged"
     val_file = "data/POS/raw/new_sec_00.tagged"
     test_file = "data/POS/raw/new_sec_00.tagged"
-    prepare_data(train_file, val_file, test_file, config['block_size'])
+    prepare_data(train_file, val_file, test_file, config['block_size'], keep_proportion=float(config['data_proportion']))
 
