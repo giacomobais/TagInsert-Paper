@@ -13,9 +13,13 @@ import wandb
 from src.models.VanillaTransformer import make_model_VT
 from src.models.TagInsert import make_model_TI
 from src.models.TagInsertL2R import make_model_TIL2R
+from datasets import DatasetDict
+from datasets import Dataset as HuggingFaceDataset
+from transformers import DataCollatorForTokenClassification, AutoModelForTokenClassification, TrainingArguments, Trainer
+import evaluate as ev
 import pandas as pd
 
-PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%"}
+PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%"}
 
 def load_config(config_path):
     with open(config_path) as file:
@@ -782,11 +786,12 @@ def evaluate(model, config, tagging):
         # Iterate through the dataset
         with tqdm(data_iter, total=len_val // config['batch_size'], desc="eval") as pbar:
             for i, batch in enumerate(pbar):
-                if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
+                if config['model_name'] == "VanillaTransformer":
                     trg = greedy_decode_VT(model, batch.src, batch.src_mask, batch.embs, config['block_size'], tgt_to_idx['<START>'])
                 elif config['model_name'] == "TagInsert":
                     trg, orders = greedy_decode_TI(model, batch.src, batch.src_mask, batch.embs, config['block_size'], batch.seq_lengths, tgt_to_idx, config)
-                
+                elif config['model_name'] == "TagInsertL2R":
+                    trg = greedy_decode_TIL2R(model, batch.src, batch.src_mask, batch.embs, config['block_size'], tgt_to_idx['<START>'])
                 trg = trg.squeeze(1)
                 trg = [[idx_to_tgt[str(idx.item())] for idx in sentence] for sentence in trg]
                 
@@ -842,7 +847,6 @@ def greedy_decode_VT(model, src, src_mask, embs, max_len, start_symbol):
     memory = model.encode(src, src_mask, embs)
     ys = torch.ones(src.size(0), 1).fill_(start_symbol).type_as(src.data)
     for _ in range(max_len - 1):
-        # TODO: change the loop
         out = model.decode(
             memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
         )
@@ -890,3 +894,124 @@ def greedy_decode_TI(model, src, src_mask, embs, max_len, seq_length, tgt_to_idx
             # print('---------------------------------------')
 
     return ys, orderings
+
+def greedy_decode_TIL2R(model, src, src_mask, embs, max_len, start_symbol):
+    memory = model.encode(src, src_mask, embs)
+    ys = torch.ones(src.size(0), 1).fill_(start_symbol).type_as(src.data)
+    for _ in range(max_len - 1):
+        out = model.decode(
+            memory, None, embs, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
+        )
+        prob = model.generator(out[:, -1])
+        _, next_word = torch.max(prob, dim=1)
+        next_word = next_word.view(src.size(0), 1)
+        ys = torch.cat((ys, next_word), dim=1)
+    return ys
+
+def preprocess_and_train_BERT_Encoder(config, tagging):
+    prop_path = PROP_CONVERTER[config['data_proportion']]
+    _, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
+    prop_path = PROP_CONVERTER[config['data_proportion']]
+    if tagging == "POS":
+        idx_to_tgt = json.load(open(f'data/POS/processed/{prop_path}/idx_to_POS.json'))
+        tgt_to_idx = json.load(open(f'data/POS/processed/{prop_path}/POS_to_idx.json'))
+    elif tagging == "CCG":
+        idx_to_tgt = json.load(open(f'data/CCG/processed/{prop_path}/idx_to_CCG.json'))
+        tgt_to_idx = json.load(open(f'data/CCG/processed/{prop_path}/CCG_to_idx.json'))
+    model = AutoModelForTokenClassification.from_pretrained(config['bert_model'], num_labels=len(tgt_to_idx), id2label=idx_to_tgt, label2id=tgt_to_idx)
+    train_data = torch.load(f"data/{tagging}/processed/{prop_path}/train_data.pth", weights_only=True)
+    val_data = torch.load(f"data/{tagging}/processed/{prop_path}/val_data.pth", weights_only=True)
+    words, tags, original_sentences = train_data['words'], train_data['tags'], train_data['original_sentences']
+    val_words, val_tags, val_original_sentences = val_data['words'], val_data['tags'], val_data['original_sentences']
+    # print(len(tags), len(words), tags[0], words[0])
+    sentence_POS_idx = [sent_tags[1:len(original_sentences[i])+1] for i, sent_tags in enumerate(tags)]
+    val_sentence_POS_idx = [sent_tags[1:len(val_original_sentences[i])+1] for i, sent_tags in enumerate(val_tags)]
+    text_sents = [' '.join(sent) for sent in original_sentences]
+    val_text_sents = [' '.join(sent) for sent in val_original_sentences]
+    tokenized_data = tokenizer(text_sents, padding="max_length", truncation=True, max_length=config['bert_block_size'], return_tensors="pt")
+    val_tokenized_data = tokenizer(val_text_sents, padding="max_length", truncation=True, max_length=config['bert_block_size'], return_tensors="pt")
+    mappings = get_BERT_mappings(tokenized_data, original_sentences, tokenizer)
+    val_mappings = get_BERT_mappings(val_tokenized_data, val_original_sentences, tokenizer)
+
+    train_labels = map_data(mappings, sentence_POS_idx)
+    val_labels = map_data(val_mappings, val_sentence_POS_idx)
+    train_tokens = original_sentences
+    val_tokens = val_original_sentences
+    train_POS = sentence_POS_idx
+    val_POS = val_sentence_POS_idx
+    # create a dictionart with the training data
+    data = {'id': list(range(len(train_tokens))), 'tokens': train_tokens, 'POS': train_POS, 'attention_mask': tokenized_data['attention_mask'].tolist(), 'input_ids': tokenized_data['input_ids'].tolist(), 'labels': train_labels}
+    df = pd.DataFrame(data)
+    train_dataset = HuggingFaceDataset.from_pandas(df)
+
+    # create a dictionary with the validation data
+    val_data = {'id': list(range(len(val_tokens))), 'tokens': val_tokens, 'POS': val_POS, 'attention_mask': val_tokenized_data['attention_mask'].tolist(), 'input_ids': val_tokenized_data['input_ids'].tolist(), 'labels': val_labels}
+    val_df = pd.DataFrame(val_data)
+    val_dataset = HuggingFaceDataset.from_pandas(val_df)
+    datasets = DatasetDict({'train': train_dataset, 'validation': val_dataset})
+    data_collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
+    training_args = TrainingArguments(disable_tqdm=False, output_dir="models/BERT_Encoder", learning_rate=config['lr'], per_device_train_batch_size=config['batch_size'], per_device_eval_batch_size=config['batch_size'], num_train_epochs=config['epochs'], weight_decay=config['weight_decay'], evaluation_strategy="epoch", report_to="wandb")
+    trainer = Trainer(model=model, args=training_args, train_dataset=datasets["train"], eval_dataset=datasets["validation"], tokenizer=tokenizer, data_collator=data_collator, compute_metrics=compute_metrics)
+    result = trainer.train()
+    trainer.save_model("models/BERT_Encoder")
+    return model
+
+def bad_tokens_and_map(tokenized_sentence, original_sentence, tokenizer, cased=True):
+    bad_tokens = []
+    detokenized_sentence = tokenizer.convert_ids_to_tokens(tokenized_sentence)
+    mapping_to_original = [None] # For the [CLS] token
+    detokenized_index = 1 # Skip the [CLS] token
+    for i, word in enumerate(original_sentence):
+        word = word if cased else word.lower()
+        detokenized_word = detokenized_sentence[detokenized_index]
+        next_detokenized_word = detokenized_sentence[detokenized_index+1]
+        if word != detokenized_word:
+            if not next_detokenized_word.startswith('##') and not detokenized_word.startswith('##'):
+                bad_tokens.append(word)
+            reconstructed_word = detokenized_word
+            while word != reconstructed_word:
+                detokenized_index += 1
+                reconstructed_word += detokenized_sentence[detokenized_index].strip('##')
+                mapping_to_original.append(i)
+            mapping_to_original.append(i)
+        else:
+            mapping_to_original.append(i)
+        detokenized_index += 1
+    while len(mapping_to_original) < len(detokenized_sentence):
+        mapping_to_original.append(None)
+    return bad_tokens, mapping_to_original
+
+def get_BERT_mappings(tokenized_data, original_sentences, tokenizer):
+    mappings = []
+    for i in range(len(tokenized_data['input_ids'])):
+        bad_tokens, mapping = bad_tokens_and_map(tokenized_data['input_ids'][i], original_sentences[i], tokenizer)
+        mappings.append(mapping)
+    return mappings
+
+def map_data(mappings, data):
+    all_labels = []
+    for i, mapping in enumerate(mappings):
+        labels = []
+        previous_word_idx = None
+        orig_j = 0
+        for j, idx in enumerate(mapping):
+            if idx is None:
+                labels.append(-100)
+            elif idx == previous_word_idx:
+                labels.append(-100)
+            else:
+                labels.append(data[i][orig_j])
+                orig_j += 1
+                previous_word_idx = idx
+        all_labels.append(labels)
+    return all_labels
+
+def compute_metrics(p):
+    metric = ev.load('accuracy')
+    pred, labels = p
+    pred = np.argmax(pred, axis=2)
+    # ignore predictions where we don't have a valid label
+    mask = labels != -100
+    pred = pred[mask]
+    labels = labels[mask]
+    return metric.compute(predictions=pred, references=labels)
