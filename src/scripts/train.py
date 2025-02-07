@@ -1,4 +1,5 @@
-from src.utils.utils import load_config, train, resume_training, preprocess_and_train_BERT_Encoder
+from utils.train_utils import train, resume_training, preprocess_and_train_BERT_Encoder
+from src.utils.preprocess_utils import load_config
 
 if __name__ == '__main__':
     # get user input

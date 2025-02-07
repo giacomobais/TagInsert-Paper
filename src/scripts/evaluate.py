@@ -1,5 +1,6 @@
-from src.utils.utils import load_config, evaluate, resume_training
-
+from utils.train_utils import resume_training
+from src.utils.preprocess_utils import load_config
+from src.utils.eval_utils import evaluate
 
 if __name__ == '__main__':
     model_to_eval = input("Enter the model you want to evaluate: \n 1: Fine-Tuned DistilBERT\n 2: Vanilla Transfomer\n 3: TagInsert\n 4: TagInsert L2R\n")
