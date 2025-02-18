@@ -35,12 +35,15 @@ class TaggingDataset(Dataset):
         self.word_sequences = data['words']
         self.tag_sequences = data['tags']
         self.original_sentences = data['original_sentences']
+        self.embs = data['embs']
 
     def shuffle(self):
         """ Shuffle util function if needed. """
         shuffled_indices = torch.randperm(len(self.word_sequences))
         self.word_sequences = [self.word_sequences[i] for i in shuffled_indices]
         self.tag_sequences = [self.tag_sequences[i] for i in shuffled_indices]
+        self.original_sentences = [self.original_sentences[i] for i in shuffled_indices]
+        self.embs = [self.embs[i] for i in shuffled_indices]
 
     def __len__(self):
         return len(self.word_sequences)
@@ -49,7 +52,8 @@ class TaggingDataset(Dataset):
         words = torch.tensor(self.word_sequences[idx], dtype=torch.long)
         tags = torch.tensor(self.tag_sequences[idx], dtype=torch.long)
         original_sentence = self.original_sentences[idx]
-        return words, tags, original_sentence
+        embs = self.embs[idx]
+        return words, tags, original_sentence, embs
 
 def load_BERT_encoder(model_name, device = 'cuda'):
     """ Returns the BERT model and tokenizer specified in the config file. """
@@ -58,100 +62,7 @@ def load_BERT_encoder(model_name, device = 'cuda'):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, tokenizer
 
-def create_mapping(sentence, tokens_tensor, tokenizer, cased = False, subword_manage = 'prefix'):
-    """ 
-    Function to create the mapping from the tokenized sentence to the detokenized sentence
-    The function takes the sentence, the tokens tensor, the tokenizer, and the casing and subword management options
-    It is essentially useful to calculate the word embeddings from the BERT model so that we get the desired subword
-    """
-    
-    mapping = [None] # for the [CLS] token
-    detokenized_index = 1 # for the [CLS] token
-    # detokenize the sentence
-    detokenized_sentence = tokenizer.convert_ids_to_tokens(tokens_tensor)
-    for i, word in enumerate(sentence):
-        word = word if cased else word.lower()
-        # get the detokenized token
-        detokenized_token = tokenizer.convert_ids_to_tokens(tokens_tensor[detokenized_index].item())
-        # if the word is not equal to the detokenized token, we need to reconstruct the word
-        if word != detokenized_token:
-            reconstructed_word = detokenized_token
-            # while the reconstructed word is not equal to the word, we need to add the index to the mapping
-            while reconstructed_word != word:
-                detokenized_index += 1
-                reconstructed_word += detokenized_sentence[detokenized_index].strip('##')
-                mapping.append(i)
-            mapping.append(i)
-        else:
-            mapping.append(i)
-        # move to the next token
-        detokenized_index += 1
-    # if the mapping is shorter than the detokenized sentence, we need to add None to the mapping
-    while len(mapping) < len(detokenized_sentence):
-        mapping.append(None)
-    # prefix case: we keep the first subword of the word and discard the rest
-    if subword_manage == 'prefix':
-        for i, idx in enumerate(mapping):
-            if idx is not None:
-                j = i+1
-                while mapping[j] == idx:
-                    mapping[j] = None
-                    j += 1
-    # suffix case: we keep the last subword of the word and discard the rest
-    elif subword_manage == 'suffix':
-        for i, idx in enumerate(mapping):
-            if idx is not None:
-                j = i
-                while mapping[j+1] == idx:
-                    mapping[j] = None
-                    j += 1
-    return mapping
 
-def extract_BERT_embs(sentences, bert_model, tokenizer, config):
-    """
-    Function to extract the BERT embeddings for the sentences
-    Through the mapping previously created, we can extract the embeddings for the words depending on the subword management
-    The embeddings are calculated for the last four layers and summed up to get a single embedding for the word
-    """
-
-    device = config['device']
-    # string together the sentences
-    marked_text = [" ".join(sentence) for sentence in sentences]
-    # use tokenizer to get tokenized text and pad up to the bert block size specified in the config
-    tokens_tensor = [tokenizer(text, padding="max_length", truncation=True, max_length=config['bert_block_size'], return_tensors="pt") for text in marked_text]
-    # get the attention mask and the input ids
-    attention_mask = torch.stack([t['attention_mask'] for t in tokens_tensor])
-    tokens_tensor = torch.stack([t['input_ids'] for t in tokens_tensor]).squeeze(1)
-    # create the mappings for the subwords
-    mappings = [create_mapping(sentence, tokens_tensor[i], tokenizer, cased = True, subword_manage=config['embedding_strategy']) for i, sentence in enumerate(sentences)]
-    tokens_tensor = tokens_tensor.to(device)
-    attention_mask = attention_mask.to(device)
-    # forward the tokens tensor and the attention mask to the BERT model
-    with torch.no_grad():
-        bert_model = bert_model.to(device)
-        outputs = bert_model(tokens_tensor, attention_mask = attention_mask)
-        bert_model = bert_model.to('cpu')
-        hidden_states = outputs.hidden_states
-        hidden_states = torch.stack(hidden_states, dim=0)
-        hidden_states = hidden_states.to('cpu')
-        hidden_states = hidden_states.permute(1,2,0,3)
-    del tokens_tensor, attention_mask
-    sentence_embeddings = []
-    # for each sentence, we sum the last four layers of the embeddings for each word
-    for i, token_embeddings in enumerate(hidden_states):
-        token_vecs_sum = []
-        for j, token in enumerate(token_embeddings):
-            if mappings[i][j] is None:
-                continue
-            sum_vec = torch.sum(token[-4:], dim=0)
-            token_vecs_sum.append(sum_vec)
-        sentence_embeddings.append(token_vecs_sum)
-    del hidden_states, mappings
-    # pad sentence embeddings to block size specified in the config
-    for i, sentence_embedding in enumerate(sentence_embeddings):
-        sentence_embeddings[i] += [torch.zeros(sentence_embedding[0].size(0))] * (config['block_size'] - len(sentence_embedding))
-    sentence_embeddings = torch.stack([torch.stack(sentence) for sentence in sentence_embeddings])
-    return sentence_embeddings
 
 def rate(step, model_size, factor, warmup):
     """ Function to calculate the learning rate for the optimizer """
@@ -319,6 +230,9 @@ class Batch_TI:
         return tgt_mask
 
 class DummyOptimizer(torch.optim.Optimizer):
+    """ 
+    Dummy optimizer class to be used when no optimizer is needed.    
+    """
     def __init__(self):
         self.param_groups = [{"lr": 0}]
         None
@@ -331,11 +245,17 @@ class DummyOptimizer(torch.optim.Optimizer):
 
 
 class DummyScheduler:
+    """
+    Dummy scheduler class to be used when no scheduler is needed.
+    """
     def step(self):
         None
 
 class LabelSmoothing(nn.Module):
-    "Implement label smoothing."
+    """
+    Calculate the Kullback-Leibler divergence loss between the predicted and the actual distribution.
+    Label smoothing is also included.
+    """
 
     def __init__(self, size, padding_idx, smoothing=0.0):
         super(LabelSmoothing, self).__init__()
@@ -360,7 +280,10 @@ class LabelSmoothing(nn.Module):
 
 
 class LossCompute_VT:
-    "A simple loss compute and train function."
+    """
+    A simple class that calculates the loss for the Vanilla Transformer and TagInsert L2R.
+    The loss is normalized by the number of tokens in the batch.
+    """
 
     def __init__(self, generator, criterion):
         self.generator = generator
@@ -377,69 +300,80 @@ class LossCompute_VT:
         return sloss.data * norm, sloss
     
 class TI_Loss(nn.Module):
-  def __init__(self, config, tgt_map):
-    super(TI_Loss, self).__init__()
-    self.tgt_map = tgt_map
-    self.config = config
+    """
+    Class to calculate the loss for TagInsert. Each sentence loss is individually calculated. The loss is defined as the negative log likelihood
+    of inserting the correct tags at all the positions corresponding to an <UNK> token. The sentence loss is the average of the losses for each position.
+    The full batch loss is the average of all sentence losses for the batch.
+    """
+    def __init__(self, config, tgt_map):
+            super(TI_Loss, self).__init__()
+            self.tgt_map = tgt_map
+            self.config = config
 
-  def sentence_loss(self, logits, forwarded_trgs, targets, sequence_length):
-    # logits has shape (51, 52), they are the logits for all slots of the i-th sentence
-    # targets has shape (51, 52), they are the actual tokens for each span, only the first k+1 spans are filled
-    # k = len(spans_del) # also known as k
-    losses = []
-    # extracting the number of tokens in a span L
-    for i, ix in enumerate(forwarded_trgs):
-      if ix == self.tgt_map['<PAD>']:
-        break
-      if ix == self.tgt_map['<UNK>']:
-        tag_to_insert = targets[i-1]
-        # print(tag_to_insert)
-        p = logits[i][tag_to_insert]
-        losses.append(-torch.log(p))
-        # print('---------------------')
-    if len(losses) == 0:
-      tag_to_insert = self.tgt_map['<END>']
-      # print(tag_to_insert, sequence_length+2)
-      p = logits[sequence_length+2, tag_to_insert]
-      losses.append(-torch.log(p))
-    out = torch.mean(torch.stack(losses))
-    return out
+    def sentence_loss(self, logits, forwarded_trgs, targets, sequence_length):
+            # function to calculate the loss for a single sentence
+            losses = []
+            # iterate over the tags present in the current trajectory step
+            for i, ix in enumerate(forwarded_trgs):
+                # if the tag is <PAD>, the sentence is over and we interrupt the loop
+                if ix == self.tgt_map['<PAD>']:
+                    break
+                # loss is calculated in positions corresponding to <UNK> tokens
+                if ix == self.tgt_map['<UNK>']:
+                    # extract gold tag for the position
+                    tag_to_insert = targets[i-1]
+                    # extract logit of inserting the gold tag in the position
+                    p = logits[i][tag_to_insert]
+                    # calculate and log the loss
+                    losses.append(-torch.log(p))
+            # This should never happen, but just in case, if the full sentence is part of the trajectory steps, we calculate the loss of inserting an <END> tag
+            if len(losses) == 0:
+                tag_to_insert = self.tgt_map['<END>']
+                p = logits[sequence_length+2, tag_to_insert]
+                losses.append(-torch.log(p))
+            # average the losses for the sentence
+            out = torch.mean(torch.stack(losses))
+            return out
 
-  def forward(self, logits, forwarded_trgs, targets, sequence_lengths, inserted):
-    # logits will have shape (256, 51, 52), 2nd dim are slots and 3rd dim is the vocab
-    # targets will have shape (256, 50), 1st dim are the k+1 slots to which loss needs to be computed, while 2nd dim are the words to be inserted in that slot
-    # ixs will have shape (256, 50), for each sentence the indeces of the spans, k can retrieve how many
-    # sep has shape (256), one k for each sentence
-    batch_losses = []
-    for i, _ in enumerate(targets):
-        if inserted[i] >= sequence_lengths[i]:
-          continue
-      # if i == 0:
-        # slot_losses = torch.zeros(k.item()+1).to(device) #k+1 slots
-        # spans_del = ixs[i, :k] # the k indeces delimitating the spans 1-2-6
-        batch_loss = self.sentence_loss(logits[i, :, :], forwarded_trgs[i, :], targets[i, :], sequence_lengths[i])
-        # print("loss of a single sequence: ",batch_loss)
-        batch_losses.append(batch_loss)
-    loss = torch.mean(torch.stack(batch_losses))
-    # print(loss)
-    return loss
+    def forward(self, logits, forwarded_trgs, targets, sequence_lengths, inserted):
+            # function to calculate the loss for the full batch
+            batch_losses = []
+            # iterate over the sentences in the batch
+            for i, _ in enumerate(targets):
+                # if every tag has been inserted, we skip the sentence
+                if inserted[i] >= sequence_lengths[i]:
+                    continue
+                # calculate the loss of the sentence, passing the according logits, gold targets and forwarded targets
+                batch_loss = self.sentence_loss(logits[i, :, :], forwarded_trgs[i, :], targets[i, :], sequence_lengths[i])
+                # log the loss
+                batch_losses.append(batch_loss)
+            # average the losses for the batch
+            loss = torch.mean(torch.stack(batch_losses))
+            return loss
 
 class LossCompute_TI:
-    "A simple loss compute and train function."
+    """
+    A simple class that calculates the loss for TagInsert.
+    """
     def __init__(self, generator, criterion, opt=None):
         self.generator = generator
         self.criterion = criterion
         self.opt = opt
 
     def __call__(self, x, forwarded_y, y, sequence_lengths, norm, inserted):
-        # SLOTS = 51, VOCAB = 52
-        x = self.generator(x) # shape (B, S * V)
+        # generate logits throught the output layer
+        x = self.generator(x)
+        # this should not happen, but just in case
         if norm == 0:
-          norm = 1
+            norm = 1
+        # calculate the loss
         loss = self.criterion(x, forwarded_y, y, sequence_lengths, inserted)
         return loss.data * norm, loss
 
 def resume_training(model_path, config, model_name, tagging):
+    """
+    Function that loads a pre-saved model from a checkpoint. If the model does not exist, it initiliazes a new untrained one.
+    """
     try:
         model, model_opt, lr_scheduler, logs = load_model(model_name, model_path, config, tagging)
         trained_epochs = logs['epochs']
@@ -475,11 +409,15 @@ class TrainState:
 
 
 def dataload(data_loader, config, bert_model, tokenizer, tgt_map, pad=0):
+    """
+    Function that iterates through the data loader and prepares the batches for the model.
+    """
     for batch_data in data_loader:
-        xb, yb, original_sentences = batch_data
-        embs = extract_BERT_embs(original_sentences, bert_model, tokenizer, config)
+        xb, yb, _, embs = batch_data
+        #embs = extract_BERT_embs(original_sentences, bert_model, tokenizer, config)
         src = xb.to(config['device'])
         tgt = yb.to(config['device'])
+        embs = torch.stack(embs, dim=0)
         embs = embs.to(config['device'])
         if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
             yield Batch_VT(src, tgt, embs, pad=pad)
@@ -488,16 +426,24 @@ def dataload(data_loader, config, bert_model, tokenizer, tgt_map, pad=0):
 
 
 def run_epoch_VT(data_iter, model, loss_compute, optimizer, lr_scheduler, config, data_len, mode = 'train', accum_iter = 1, train_state = TrainState()):
+    """
+    Function that runs a single epoch for the Vanilla Transformer and TagInsert L2R.
+    It includes backward prop and wandb tracking for the training mode. The function is also used for evaluation.
+    """
     total_tokens = 0
     total_loss = 0
     losses = []
     log_id = "Batch train loss" if mode == "train" else "Batch val loss"
     with tqdm(data_iter, total = data_len // config['batch_size'], desc=mode) as pbar:
+        # for each batch in the epoch
         for i, batch in enumerate(pbar):
+            # forward to the model and get the logits
             out = model.forward(batch.src, batch.tgt, batch.src_mask, batch.tgt_mask, batch.embs)
+            # calculate the loss for the batch
             loss, loss_node = loss_compute(out, batch.tgt_y, batch.ntokens)
             losses.append(loss_node.item())
             if mode == "train":
+                # if in training mode, we calculate the gradients and update the model
                 loss_node.backward()
                 train_state.step += 1
                 train_state.samples += batch.src.size(0)
@@ -506,34 +452,45 @@ def run_epoch_VT(data_iter, model, loss_compute, optimizer, lr_scheduler, config
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     train_state.accum_step += 1
+                # log the train loss for the batch
                 wandb.log({log_id: loss_node.item(), "train_step": train_state.step})
+                # step the learning rate scheduler
                 lr_scheduler.step()
             else:
                 train_state.eval_step += 1
+                # log the validation loss for the batch
                 wandb.log({log_id: loss_node.item(), "val_step": train_state.eval_step})
+            # update the total loss
             total_loss += loss
             total_tokens += batch.ntokens
             pbar.set_postfix(loss=loss_node.item())
-
+    # return the loss normalized by the number of tokens
     return total_loss / total_tokens, train_state, losses
 
 def run_epoch_TI(data_iter, model, loss_compute, optimizer, lr_scheduler, config, data_len, mode = 'train', accum_iter = 1, train_state = TrainState()):
+    """
+    Function that runs a single epoch for TagInsert.
+    It includes backward prop and wandb tracking for the training mode. The function is also used for evaluation.
+    """
     total_tokens = 0
     total_loss = 0
     current_losses = []
     log_id = "Batch train loss" if mode == "train" else "Batch val loss"
     with tqdm(data_iter, total = data_len // config['batch_size'], desc=mode) as pbar:
+        # for each batch in the epoch
         for i, batch in enumerate(pbar):
+            # get the length of the longest sentence in the batch minus one, so that we don't calculate more losses than needed
             max_len = np.max(batch.seq_lengths) - 1
             losses = torch.zeros(max_len).to(config['device'])
+            # for each trajectory step
             for traj_step in range(max_len):
-                # print(f'Calculating loss for trajectory {traj_step}.')
+                # forward to the model and get the logits
                 out = model.forward(batch.src, batch.tgt,
                                     batch.src_mask, batch.tgt_mask, batch.embs)
+                # calculate the loss for the batch
                 _, loss_node = loss_compute(out, batch.tgt, batch.tgt_y, batch.seq_lengths, batch.ntokens, batch.inserted)
-                # loss_node = loss_node / accum_iter
                 if mode == "train":
-                    # loss_node = Variable(loss_node, requires_grad = True)
+                    # if in training mode, we calculate the gradients and update the model
                     loss_node.backward()
                     train_state.samples += batch.src.shape[0]
                     train_state.tokens += batch.ntokens
@@ -544,29 +501,43 @@ def run_epoch_TI(data_iter, model, loss_compute, optimizer, lr_scheduler, config
                 norm = batch.ntokens
                 if norm == 0:
                     norm = 1
+                # log the loss for the trajectory step
                 losses[traj_step] = loss_node.item()
+                # move to the next trajectory step, a new pre-sampled tag is inserted in place of a <UNK> token
                 batch.next_trajectory()
+            # free up memory
             del batch.embs
+            # average the losses for the batch
             loss_node_backward = torch.mean(losses)
             if mode == "train":
                 train_state.step += 1
+                # log the train loss for the batch
                 wandb.log({log_id: loss_node_backward.item(), "train_step": train_state.step})
             else:
                 train_state.eval_step += 1
+                # log the validation loss for the batch
                 wandb.log({log_id: loss_node_backward.item(), "val_step": train_state.eval_step})
+            # log the loss for the batch
             current_losses.append(loss_node_backward.item())
             total_loss += loss_node_backward.data
             total_tokens += batch.ntokens
             pbar.set_postfix(loss=loss_node_backward.item())
+    # return the loss normalized by the number of tokens
     return total_loss / total_tokens, train_state, current_losses
 
 def collate_fn(batch):
-    words, tags, original_sentences = zip(*batch)
+    """
+    Collate function for the dataloader. It stacks the words and tags and returns the original sentences and word embeddings.
+    """
+    words, tags, original_sentences, embs = zip(*batch)
     words = torch.stack(words)
     tags = torch.stack(tags)
-    return words, tags, original_sentences
+    return words, tags, original_sentences, embs
 
 def get_dataloaders(data_path, config, shuffle = True):
+    """
+    Function that creates Datasets and Dataloaders for the training and validation data.
+    """
     train_dataset = TaggingDataset(data_path + f"train_data.pth")
     val_dataset = TaggingDataset(data_path + f"val_data.pth")
     train_dataloader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=shuffle, collate_fn=collate_fn)
@@ -576,6 +547,9 @@ def get_dataloaders(data_path, config, shuffle = True):
     return train_dataloader, val_dataloader, len_train, len_val
 
 def define_wandb_metrics():
+    """
+    Simple function that returns metric to be logged in wandb.
+    """
     wandb.define_metric("train_step")
     wandb.define_metric("Batch train loss", step_metric="train_step")
     wandb.define_metric("val_step")
@@ -585,7 +559,11 @@ def define_wandb_metrics():
     wandb.define_metric("val_loss", step_metric="epoch")
 
 def train(model_package, config, tagging, save = True):
+    """
+    Function that trains any of the models included in this package.
+    """
     model, model_opt, lr_scheduler, trained_epochs, train_losses, val_losses = model_package
+    # naming conversions for the wandb run
     if config['model_name'] == "VanillaTransformer":
         run_model_name = "VT"
     elif config['model_name'] == "TagInsert":
@@ -596,38 +574,54 @@ def train(model_package, config, tagging, save = True):
         run_model_name = "TIL2R"
     run_name = run_model_name + "_" + tagging + "_" + str(config['data_proportion'])
     with wandb.init(project="TagInsert", config=config, name = run_name):
+        # load the BERT encoder, to remove if using pre calculated embeddings
         bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
+        # naming for paths logic
         prop_path = PROP_CONVERTER[config['data_proportion']]
+        # load the mapping for the tags
         tgt_map = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
+        # get the dataloaders for the training and validation data
         train_dataloader, val_dataloader, len_train, len_val = get_dataloaders(f"data/{tagging}/processed/{prop_path}/", config)
+        # initialize losses depending on the model
         if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
             criterion = LabelSmoothing(size=len(tgt_map), padding_idx=0, smoothing=0.0)
         elif config['model_name'] == "TagInsert":
             criterion = TI_Loss(config, tgt_map)
+        
+        # training setup
         train_state = TrainState()
         define_wandb_metrics()
         wandb.watch(model, log="all")
         all_train_losses = []
         all_val_losses = []
+        # for each epoch, starts by the last trained epoch in case of checkpoint
         for epoch in range(trained_epochs, config['epochs']):
             print(f"Epoch {epoch}")
+            # get the iterators for the training and validation data
             epoch_data_iter = dataload(train_dataloader, config, bert_model, tokenizer, tgt_map, pad=0)
             val_epoch_data_iter = dataload(val_dataloader, config, bert_model, tokenizer, tgt_map, pad=0)
             model.train()
+            # run the epoch for the model
             if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
                 train_losses = run_epoch_VT(epoch_data_iter, model, LossCompute_VT(model.generator, criterion), model_opt, lr_scheduler, config, len_train, mode = 'train', train_state=train_state)[2]
             elif config['model_name'] == "TagInsert":
                 train_losses = run_epoch_TI(epoch_data_iter, model, LossCompute_TI(model.generator, criterion), model_opt, lr_scheduler, config, len_train, mode = 'train', train_state=train_state)[2]
+            # log losses
             all_train_losses += train_losses
+            # validation epoch
             with torch.no_grad():
                 model.eval()
                 if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
                     val_losses = run_epoch_VT(val_epoch_data_iter, model, LossCompute_VT(model.generator, criterion), DummyOptimizer(),DummyScheduler(), config, len_val, mode = 'eval', train_state=train_state)[2]
                 elif config['model_name'] == "TagInsert":
                     val_losses = run_epoch_TI(val_epoch_data_iter, model, LossCompute_TI(model.generator, criterion), DummyOptimizer(),DummyScheduler(), config, len_val, mode = 'eval', train_state=train_state)[2]
+                # log losses
                 all_val_losses += val_losses
+            # log the losses for the epoch in wandb
             wandb.log({"train_loss": np.mean(train_losses) , "val_loss": np.mean(val_losses), "epoch": epoch})
     wandb.finish()
+
+    # save model if specified
     if save:
         model_name = config['model_name'] + "_" + tagging + "_" + str(config['data_proportion'])
         save_model(model, model_opt, lr_scheduler, all_train_losses, all_val_losses, epoch, f"models/{model_name}")
@@ -636,93 +630,135 @@ def train(model_package, config, tagging, save = True):
 ########## BERT Encoder Train+Eval logic ##########
 
 def preprocess_and_train_BERT_Encoder(config, tagging):
+    """
+    Function that slightly modifies the data to be used with the BERT encoder and trains the model.
+    Training is done through the HuggingFace Trainer API, which also includes validation and tracking through wandb.
+    """
     prop_path = PROP_CONVERTER[config['data_proportion']]
+    # load the tokenizer and mapping for the tags
     _, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
-    prop_path = PROP_CONVERTER[config['data_proportion']]
     idx_to_tgt = json.load(open(f'data/{tagging}/processed/{prop_path}/idx_to_{tagging}.json'))
     tgt_to_idx = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
+    # load the BERT model for token classification
     model = AutoModelForTokenClassification.from_pretrained(config['bert_model'], num_labels=len(tgt_to_idx), id2label=idx_to_tgt, label2id=tgt_to_idx)
+    # load the training and validation data
     train_data = torch.load(f"data/{tagging}/processed/{prop_path}/train_data.pth", weights_only=True)
     val_data = torch.load(f"data/{tagging}/processed/{prop_path}/val_data.pth", weights_only=True)
-    words, tags, original_sentences = train_data['words'], train_data['tags'], train_data['original_sentences']
-    val_words, val_tags, val_original_sentences = val_data['words'], val_data['tags'], val_data['original_sentences']
-    # print(len(tags), len(words), tags[0], words[0])
+    _, tags, original_sentences = train_data['words'], train_data['tags'], train_data['original_sentences']
+    _, val_tags, val_original_sentences = val_data['words'], val_data['tags'], val_data['original_sentences']
+    # remove start token and paddings from tags
     sentence_POS_idx = [sent_tags[1:len(original_sentences[i])+1] for i, sent_tags in enumerate(tags)]
     val_sentence_POS_idx = [sent_tags[1:len(val_original_sentences[i])+1] for i, sent_tags in enumerate(val_tags)]
+    # convert list of words into normal strings for the BERT forward pass
     text_sents = [' '.join(sent) for sent in original_sentences]
     val_text_sents = [' '.join(sent) for sent in val_original_sentences]
+    # tokenize words for the BERT model
     tokenized_data = tokenizer(text_sents, padding="max_length", truncation=True, max_length=config['bert_block_size'], return_tensors="pt")
     val_tokenized_data = tokenizer(val_text_sents, padding="max_length", truncation=True, max_length=config['bert_block_size'], return_tensors="pt")
+    # map each subword token to the original word index
     mappings = get_BERT_mappings(tokenized_data, original_sentences, tokenizer)
     val_mappings = get_BERT_mappings(val_tokenized_data, val_original_sentences, tokenizer)
-
+    #  mapping the tags to the words using the prefix method
     train_labels = map_data(mappings, sentence_POS_idx)
     val_labels = map_data(val_mappings, val_sentence_POS_idx)
+    # renaming for clarity
     train_tokens = original_sentences
     val_tokens = val_original_sentences
     train_POS = sentence_POS_idx
     val_POS = val_sentence_POS_idx
-    # create a dictionart with the training data
+    # create a huggingface dataset with the training data and all the necessary information for training
     data = {'id': list(range(len(train_tokens))), 'tokens': train_tokens, 'POS': train_POS, 'attention_mask': tokenized_data['attention_mask'].tolist(), 'input_ids': tokenized_data['input_ids'].tolist(), 'labels': train_labels}
     df = pd.DataFrame(data)
     train_dataset = HuggingFaceDataset.from_pandas(df)
-
-    # create a dictionary with the validation data
+    # create a huggingface dataset with the validation data and all the necessary information for validation
     val_data = {'id': list(range(len(val_tokens))), 'tokens': val_tokens, 'POS': val_POS, 'attention_mask': val_tokenized_data['attention_mask'].tolist(), 'input_ids': val_tokenized_data['input_ids'].tolist(), 'labels': val_labels}
     val_df = pd.DataFrame(val_data)
     val_dataset = HuggingFaceDataset.from_pandas(val_df)
+    # merge the datasets and define collator
     datasets = DatasetDict({'train': train_dataset, 'validation': val_dataset})
     data_collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
+    # setup training
     training_args = TrainingArguments(disable_tqdm=False, output_dir="models/BERT_Encoder", learning_rate=config['lr'], per_device_train_batch_size=config['batch_size'], per_device_eval_batch_size=config['batch_size'], num_train_epochs=config['epochs'], weight_decay=config['weight_decay'], evaluation_strategy="epoch", report_to="wandb")
     trainer = Trainer(model=model, args=training_args, train_dataset=datasets["train"], eval_dataset=datasets["validation"], tokenizer=tokenizer, data_collator=data_collator, compute_metrics=compute_metrics)
-    result = trainer.train()
+    # train, result are tracked through wandb
+    _ = trainer.train()
+    # save model
     trainer.save_model("models/BERT_Encoder")
     return model
 
 def bad_tokens_and_map(tokenized_sentence, original_sentence, tokenizer, cased=True):
+    """
+    Function that tracks the subwords from the BERT tokenizer to their original words indeces.
+    The function also tracks weirdly tokenized words.
+    """
     bad_tokens = []
+    # get the original subwords from the tokenized sentence
     detokenized_sentence = tokenizer.convert_ids_to_tokens(tokenized_sentence)
     mapping_to_original = [None] # For the [CLS] token
     detokenized_index = 1 # Skip the [CLS] token
+    # for each word in the original sentence
     for i, word in enumerate(original_sentence):
+        # convert to lower case if needed
         word = word if cased else word.lower()
+        # get the two next subwords for the current word
         detokenized_word = detokenized_sentence[detokenized_index]
         next_detokenized_word = detokenized_sentence[detokenized_index+1]
+        # reconstructing the word from the subwords in order to track how many subwords are part of the word
         if word != detokenized_word:
+            # if neither the current subword nor the next one start with '##', it means that this is a weirdly tokenized word, we save it in case it is needed for inspection
             if not next_detokenized_word.startswith('##') and not detokenized_word.startswith('##'):
                 bad_tokens.append(word)
+            # progressively reconstruct the word from the subwords
             reconstructed_word = detokenized_word
             while word != reconstructed_word:
+                # go to the next subword
                 detokenized_index += 1
                 reconstructed_word += detokenized_sentence[detokenized_index].strip('##')
+                # track the index for the original word
                 mapping_to_original.append(i)
+            # last subword to track for this word
             mapping_to_original.append(i)
+        # if there was no subword, just track the original word index
         else:
             mapping_to_original.append(i)
+        # go next subword
         detokenized_index += 1
+    # make sure the mapping is the same length as the original sentence
     while len(mapping_to_original) < len(detokenized_sentence):
         mapping_to_original.append(None)
     return bad_tokens, mapping_to_original
 
 def get_BERT_mappings(tokenized_data, original_sentences, tokenizer):
+    """
+    Function that gets the mapping from the subwords to the original words for each sentence.
+    """
     mappings = []
     for i in range(len(tokenized_data['input_ids'])):
-        bad_tokens, mapping = bad_tokens_and_map(tokenized_data['input_ids'][i], original_sentences[i], tokenizer)
+        _, mapping = bad_tokens_and_map(tokenized_data['input_ids'][i], original_sentences[i], tokenizer)
         mappings.append(mapping)
     return mappings
 
 def map_data(mappings, data):
+    """
+    Returns a mapping that links the first subword of each word to the tag of the word (prefix method).
+    """
     all_labels = []
+    # for each sentence
     for i, mapping in enumerate(mappings):
         labels = []
         previous_word_idx = None
         orig_j = 0
-        for j, idx in enumerate(mapping):
+        # for each subword
+        for _, idx in enumerate(mapping):
+            # if we logged a none, it is either the [CLS] or paddings, which we ignore
             if idx is None:
                 labels.append(-100)
+            # if the mapping show the same index as the previous one, it means that the subword is part of the same word and we only map the first subword
             elif idx == previous_word_idx:
                 labels.append(-100)
+            # first subward, this one will be mapped to the tag of the word
             else:
+                # get the tag of the word
                 labels.append(data[i][orig_j])
                 orig_j += 1
                 previous_word_idx = idx
@@ -730,6 +766,9 @@ def map_data(mappings, data):
     return all_labels
 
 def compute_metrics(p):
+    """
+    Simple function to compute the accuracy of the BERT model.
+    """
     metric = ev.load('accuracy')
     pred, labels = p
     pred = np.argmax(pred, axis=2)

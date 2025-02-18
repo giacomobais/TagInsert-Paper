@@ -1,4 +1,4 @@
-from utils.train_utils import train, resume_training, preprocess_and_train_BERT_Encoder
+from src.utils.train_utils import train, resume_training, preprocess_and_train_BERT_Encoder
 from src.utils.preprocess_utils import load_config
 
 if __name__ == '__main__':
@@ -19,7 +19,7 @@ if __name__ == '__main__':
     if model_to_train == "3":
         config = load_config("config/TI_config.yaml")
         model_package = resume_training(model_path = f"models/TagInsert_{tagging}_{str(config['data_proportion'])}", config = config, model_name = "TI", tagging=tagging)
-        model = train(model_package, config, tagging, save = True)
+        model = train(model_package, config, tagging, save = False)
     if model_to_train == "4":
         config = load_config("config/TIL2R_config.yaml")
         model_package = resume_training(model_path = f"models/TagInsertL2R_{tagging}_{str(config['data_proportion'])}", config = config, model_name = "TIL2R", tagging=tagging)

@@ -1,4 +1,4 @@
-from src.utils.preprocess_utils import load_config, prepare_data
+from src.utils.preprocess_utils import load_config, prepare_data, prepare_data_PMB
 
 if __name__ == '__main__':
     config = load_config("config/VT_config.yaml")
@@ -11,6 +11,8 @@ if __name__ == '__main__':
     train_file = "data/CCG/raw/Rebank_sec01-22.stagged"
     val_file = "data/CCG/raw/Rebank_sec00.stagged"
     test_file = "data/CCG/raw/Rebank_sec23.stagged"
+    pmb_file = "data/PMB/PMB_3.0.0/00/00/stagged/00.stagged"
     tagging = "CCG"
-    prepare_data(train_file, val_file, test_file, tagging, config['block_size'], keep_proportion=float(config['data_proportion']))
+    # prepare_data(train_file, val_file, test_file, tagging, config)
+    prepare_data_PMB(pmb_file)
 

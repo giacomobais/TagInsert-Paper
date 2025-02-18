@@ -55,16 +55,11 @@ def make_model_TI(tagging, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
     attn = MultiHeadedAttention(h, d_model)
     ff = PositionwiseFeedForward(d_model, d_ff, dropout)
     position = PositionalEncoding(d_model, dropout)
-    if tagging == "POS":
-        word_to_idx = json.load(open("data/POS/processed/100%/word_to_idx.json"))
-        src_vocab = len(word_to_idx)
-        POS_to_idx = json.load(open("data/POS/processed/100%/POS_to_idx.json"))
-        tgt_vocab = len(POS_to_idx)
-    elif tagging == "CCG":
-        word_to_idx = json.load(open("data/CCG/processed/100%/word_to_idx.json"))
-        src_vocab = len(word_to_idx)
-        CCG_to_idx = json.load(open("data/CCG/processed/100%/CCG_to_idx.json"))
-        tgt_vocab = len(CCG_to_idx)
+    # load mappings to det the vocab size for words and tags depending on the tagging task. Proportion does not matter, as mappings are the same for all proportions.
+    word_to_idx = json.load(open(f"data/{tagging}/processed/100%/word_to_idx.json"))
+    src_vocab = len(word_to_idx)
+    tgt_to_idx = json.load(open(f"data/{tagging}/processed/100%/{tagging}_to_idx.json"))
+    tgt_vocab = len(tgt_to_idx)
     model = TagInsert(
         Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),
         Decoder(DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout), N),

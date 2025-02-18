@@ -5,6 +5,11 @@ from torch.nn.functional import log_softmax
 from torch import nn
 import json
 
+"""
+Most of the code in this file is taken from the Annotated Transformer tutorial.
+by Harvard NLP: https://nlp.seas.harvard.edu/annotated-transformer/
+"""
+
 class EncoderDecoder(nn.Module):
     """
     A standard Encoder-Decoder architecture. Base for this and many
@@ -206,13 +211,15 @@ class PositionwiseFeedForward(nn.Module):
         return self.w_2(self.dropout(self.w_1(x).relu()))
 
 class Embeddings(nn.Module):
+    """
+    Embeddings class for the words, in the current implementation it does nothing as the embeddings are already calculated.
+    Kept it in case we want to add more functionality in the future.
+    """
     def __init__(self, d_model, vocab):
         super(Embeddings, self).__init__()
-        # self.lut = nn.Embedding(vocab, d_model)
         self.d_model = d_model
 
     def forward(self, x):
-        # return self.lut(x) * math.sqrt(self.d_model)
         return x
 
 class POS_Embeddings(nn.Module):
@@ -252,16 +259,11 @@ def make_model_VT(tagging, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
     attn = MultiHeadedAttention(h, d_model)
     ff = PositionwiseFeedForward(d_model, d_ff, dropout)
     position = PositionalEncoding(d_model, dropout)
-    if tagging == "POS":
-        word_to_idx = json.load(open("data/POS/processed/100%/word_to_idx.json"))
-        src_vocab = len(word_to_idx)
-        POS_to_idx = json.load(open("data/POS/processed/100%/POS_to_idx.json"))
-        tgt_vocab = len(POS_to_idx)
-    elif tagging == "CCG":
-        word_to_idx = json.load(open("data/CCG/processed/100%/word_to_idx.json"))
-        src_vocab = len(word_to_idx)
-        CCG_to_idx = json.load(open("data/CCG/processed/100%/CCG_to_idx.json"))
-        tgt_vocab = len(CCG_to_idx)
+    # load mappings to det the vocab size for words and tags depending on the tagging task. Proportion does not matter, as mappings are the same for all proportions.
+    word_to_idx = json.load(open(f"data/{tagging}/processed/100%/word_to_idx.json"))
+    src_vocab = len(word_to_idx)
+    tgt_to_idx = json.load(open(f"data/{tagging}/processed/100%/{tagging}_to_idx.json"))
+    tgt_vocab = len(tgt_to_idx)
     model = EncoderDecoder(
         Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),
         Decoder(DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout), N),
@@ -269,6 +271,7 @@ def make_model_VT(tagging, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
         nn.Sequential(POS_Embeddings(d_model, tgt_vocab), c(position)),
         Generator(d_model, tgt_vocab),
     )
+    # Xaviers initialization for the model parameters
     for p in model.parameters():
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)
