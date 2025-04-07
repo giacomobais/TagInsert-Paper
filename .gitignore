@@ -4,3 +4,6 @@ new_sec_00.tagged
 new_sec_01-22.tagged
 *.pth
 *.json
+*.csv
+*.stagged
+*.tagged

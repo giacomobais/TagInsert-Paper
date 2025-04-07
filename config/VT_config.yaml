@@ -14,3 +14,4 @@ bert_block_size: 200
 hidden_size: 768
 data_proportion: 0.1
 embedding_strategy: "prefix"
+tagging: "POS"

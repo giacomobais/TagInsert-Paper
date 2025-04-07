@@ -5,6 +5,7 @@ import numpy as np
 from transformers import AutoModel, AutoTokenizer
 
 PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%"}
+BERT_FINDER = {"en": "bert-base-cased", "de": "bert-base-german-cased", "it": "dbmdz/bert-base-italian-cased", "nl":"GroNLP/bert-base-dutch-cased"}
 
 def load_config(config_path):
     """
@@ -32,7 +33,7 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
     vocab_POS = []
 
     # reading the training data
-    x = open(train_file)
+    x = open(train_file, encoding='utf-8')
     for line in x.readlines():
         tokens = []
         POS = []
@@ -52,7 +53,7 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
             sentence_POS.append(POS)
     x.close()
     # reading the validation and test data, same as training data
-    x = open(val_file)
+    x = open(val_file, encoding='utf-8')
     for line in x.readlines():
         tokens = []
         POS = []
@@ -71,7 +72,7 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
             val_sentence_POS.append(POS)
     x.close()
 
-    x = open(test_file)
+    x = open(test_file, encoding='utf-8')
     for line in x.readlines():
         tokens = []
         POS = []
@@ -148,13 +149,14 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
         sentence_idx += [word_to_idx['<PAD>']] * (config['block_size'] - len(sentence_idx))
         test_sentence_tokens_idx.append(sentence_idx)
 
-    # extract BERT embeddings in batches of batch_size
-    train_embs = []
-    # load the BERT model and tokenizer
-    bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
-    for i in range(0, len(sentence_tokens_idx), config['batch_size']):
-        embs = extract_BERT_embs(sentence_tokens[i:i+config['batch_size']], bert_model, tokenizer, config)
-        train_embs.append(embs)
+    # # extract BERT embeddings in batches of batch_size
+    # train_embs = []
+    # # load the BERT model and tokenizer
+    # bert_name = BERT_FINDER[config['language']]
+    # bert_model, tokenizer = load_BERT_encoder(bert_name, config['device'])
+    # for i in range(0, len(sentence_tokens_idx), config['batch_size']):
+    #     embs = extract_BERT_embs(sentence_tokens[i:i+config['batch_size']], bert_model, tokenizer, config)
+    #     train_embs.append(embs)
     
     # randomly sample a proportion of the training data, depending on the config file
     keep_proportion = float(config['data_proportion'])
@@ -165,20 +167,20 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
         sentence_tokens_idx = [sentence_tokens_idx[i] for i in sentences_to_keep]
         sentence_POS_idx = [sentence_POS_idx[i] for i in sentences_to_keep]
         sentence_tokens = [sentence_tokens[i] for i in sentences_to_keep]
-        train_embs = [train_embs[i] for i in sentences_to_keep]
-    train_embs = torch.cat(train_embs, dim=0)
+        # train_embs = [train_embs[i] for i in sentences_to_keep]
+    # train_embs = torch.cat(train_embs, dim=0)
 
     # extract BERT embeddings for validation and test data
-    val_embs = []
-    for i in range(0, len(val_sentence_tokens_idx), config['batch_size']):
-        embs = extract_BERT_embs(val_sentence_tokens[i:i+config['batch_size']], bert_model, tokenizer, config)
-        val_embs.append(embs)
-    val_embs = torch.cat(val_embs, dim=0)
-    test_embs = []
-    for i in range(0, len(test_sentence_tokens_idx), config['batch_size']):
-        embs = extract_BERT_embs(test_sentence_tokens[i:i+config['batch_size']], bert_model, tokenizer, config)
-        test_embs.append(embs)
-    test_embs = torch.cat(test_embs, dim=0)
+    # val_embs = []
+    # for i in range(0, len(val_sentence_tokens_idx), config['batch_size']):
+    #     embs = extract_BERT_embs(val_sentence_tokens[i:i+config['batch_size']], bert_model, tokenizer, config)
+    #     val_embs.append(embs)
+    # val_embs = torch.cat(val_embs, dim=0)
+    # test_embs = []
+    # for i in range(0, len(test_sentence_tokens_idx), config['batch_size']):
+    #     embs = extract_BERT_embs(test_sentence_tokens[i:i+config['batch_size']], bert_model, tokenizer, config)
+    #     test_embs.append(embs)
+    # test_embs = torch.cat(test_embs, dim=0)
 
     # renaming for handiness
     train_words = sentence_tokens_idx
@@ -194,19 +196,40 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
     # saving processed data
     prop_path = PROP_CONVERTER[keep_proportion]
 
-    torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences, 'embs': train_embs}, f'data/{tagging}/processed/{prop_path}/train_data.pth')
-    torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences, 'embs': val_embs}, f'data/{tagging}/processed/{prop_path}/val_data.pth')
-    torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences, 'embs': test_embs}, f'data/{tagging}/processed/{prop_path}/test_data.pth')
+    # torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences, 'embs': train_embs}, f'data/{tagging}/processed/{prop_path}/train_data.pth')
+    # torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences, 'embs': val_embs}, f'data/{tagging}/processed/{prop_path}/val_data.pth')
+    # torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences, 'embs': test_embs}, f'data/{tagging}/processed/{prop_path}/test_data.pth')
+    if tagging == 'PMB':
+        language = config['language']
+        torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/{tagging}/{language}/processed/train_data.pth')
+        torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/{tagging}/{language}/processed/val_data.pth')
+        torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, f'data/{tagging}/{language}/processed/test_data.pth')
+    else:
+        torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/{tagging}/processed/{prop_path}/train_data.pth')
+        torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/{tagging}/processed/{prop_path}/val_data.pth')
+        torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, f'data/{tagging}/processed/{prop_path}/test_data.pth')
+
 
     # saving mappings
-    with open(f'data/{tagging}/processed/{prop_path}/word_to_idx.json', 'w') as f:
-        json.dump(word_to_idx, f)
-    with open(f'data/{tagging}/processed/{prop_path}/idx_to_word.json', 'w') as f:
-        json.dump(idx_to_word, f)
-    with open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json', 'w') as f:
-        json.dump(POS_to_idx, f)
-    with open(f'data/{tagging}/processed/{prop_path}/idx_to_{tagging}.json', 'w') as f:
-        json.dump(idx_to_POS, f)
+    if tagging == 'PMB':
+        language = config['language']
+        with open(f'data/{tagging}/{language}/processed/word_to_idx.json', 'w', encoding='utf-8') as f:
+            json.dump(word_to_idx, f, ensure_ascii=False)
+        with open(f'data/{tagging}/{language}/processed/idx_to_word.json', 'w', encoding='utf-8') as f:
+            json.dump(idx_to_word, f, ensure_ascii=False)
+        with open(f'data/{tagging}/{language}/processed/{tagging}_to_idx.json', 'w', encoding='utf-8') as f:
+            json.dump(POS_to_idx, f, ensure_ascii=False)
+        with open(f'data/{tagging}/{language}/processed/idx_to_{tagging}.json', 'w', encoding='utf-8') as f:
+            json.dump(idx_to_POS, f, ensure_ascii=False)
+    else:
+        with open(f'data/{tagging}/processed/{prop_path}/word_to_idx.json', 'w') as f:
+            json.dump(word_to_idx, f)
+        with open(f'data/{tagging}/processed/{prop_path}/idx_to_word.json', 'w') as f:
+            json.dump(idx_to_word, f)
+        with open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json', 'w') as f:
+            json.dump(POS_to_idx, f)
+        with open(f'data/{tagging}/processed/{prop_path}/idx_to_{tagging}.json', 'w') as f:
+            json.dump(idx_to_POS, f)
 
 
 
@@ -310,4 +333,11 @@ def load_BERT_encoder(model_name, device = 'cuda'):
     model = AutoModel.from_pretrained(model_name, output_hidden_states = True)
     model = model.to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # add a special marker tokens for PMB
+    special_tokens_dict = {'additional_special_tokens': ['<M>']}
+    # the Dutch BERT model lacks some special tokens
+    if model_name == BERT_FINDER['nl']:
+        special_tokens_dict = {'additional_special_tokens': ['<M>', '~', '\u20AC', '[', ']']}
+    _ = tokenizer.add_special_tokens(special_tokens_dict)
+    model.resize_token_embeddings(len(tokenizer))
     return model, tokenizer

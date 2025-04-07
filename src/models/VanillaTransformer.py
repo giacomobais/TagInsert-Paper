@@ -253,16 +253,22 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, : x.size(1)].requires_grad_(False)
         return self.dropout(x)
     
-def make_model_VT(tagging, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
+def make_model_VT(config, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
     "Helper: Construct a model from hyperparameters."
     c = copy.deepcopy
     attn = MultiHeadedAttention(h, d_model)
     ff = PositionwiseFeedForward(d_model, d_ff, dropout)
     position = PositionalEncoding(d_model, dropout)
     # load mappings to det the vocab size for words and tags depending on the tagging task. Proportion does not matter, as mappings are the same for all proportions.
-    word_to_idx = json.load(open(f"data/{tagging}/processed/100%/word_to_idx.json"))
+    tagging = config['tagging']
+    if tagging == "PMB":
+        lang = config['language']
+        word_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/word_to_idx.json"))
+        tgt_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/{tagging}_to_idx.json"))
+    else:
+        word_to_idx = json.load(open(f"data/{tagging}/processed/100%/word_to_idx.json"))
+        tgt_to_idx = json.load(open(f"data/{tagging}/processed/100%/{tagging}_to_idx.json"))
     src_vocab = len(word_to_idx)
-    tgt_to_idx = json.load(open(f"data/{tagging}/processed/100%/{tagging}_to_idx.json"))
     tgt_vocab = len(tgt_to_idx)
     model = EncoderDecoder(
         Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),

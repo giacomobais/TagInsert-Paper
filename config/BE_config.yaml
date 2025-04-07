@@ -12,3 +12,5 @@ block_size: 102
 bert_block_size: 200
 data_proportion: 0.1
 embedding_strategy: "prefix"
+tagging: "CCG"
+language: "it"

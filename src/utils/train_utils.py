@@ -21,7 +21,7 @@ import pandas as pd
 
 # Converter for the path of the processed data, proportion to percentage
 PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%"}
-
+BERT_FINDER = {"en": "bert-base-cased", "de": "bert-base-german-cased", "it": "dbmdz/bert-base-italian-cased", "nl":"GroNLP/bert-base-dutch-cased"}
 
 #### General Training utils #####
 
@@ -60,6 +60,11 @@ def load_BERT_encoder(model_name, device = 'cuda'):
     model = AutoModel.from_pretrained(model_name, output_hidden_states = True)
     model = model.to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    special_tokens_dict = {'additional_special_tokens': ['<M>']}
+    if model_name == BERT_FINDER['nl']:
+        special_tokens_dict = {'additional_special_tokens': ['<M>', '~', '\u20AC', '[', ']']}
+    _ = tokenizer.add_special_tokens(special_tokens_dict)
+    model.resize_token_embeddings(len(tokenizer))
     return model, tokenizer
 
 
@@ -89,11 +94,11 @@ def load_model(model_name, path, config, tagging):
     """ Function to load the model, the optimizer, the learning rate scheduler, the training and validation losses and the number of epochs """
     
     if model_name == "VT":
-        model = make_model_VT(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+        model = make_model_VT(config, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
     elif model_name == "TI":
-        model = make_model_TI(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+        model = make_model_TI(config, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
     elif model_name == "TIL2R":
-        model = make_model_TIL2R(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+        model = make_model_TIL2R(config, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
     model = model.to(config['device'])
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], betas=(config['betas'][0], config['betas'][1]), eps=config['eps']) 
     lr_scheduler = LambdaLR(optimizer=optimizer,lr_lambda=lambda step: rate(step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=config['warmup']),)
@@ -382,11 +387,11 @@ def resume_training(model_path, config, model_name, tagging):
         print('Loading a pre-existent model.')
     except:
         if model_name == "VT":
-            model = make_model_VT(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+            model = make_model_VT(config, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
         elif model_name == "TI":
-            model = make_model_TI(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+            model = make_model_TI(config, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
         elif model_name == "TIL2R":
-            model = make_model_TIL2R(tagging, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
+            model = make_model_TIL2R(config, d_model = config['hidden_size'], N=config['n_stacks'], h = config['n_heads'])
         model_opt = torch.optim.Adam(model.parameters(), lr=config['lr'], betas=(config['betas'][0], config['betas'][1]), eps=config['eps']) 
         lr_scheduler = LambdaLR(optimizer=model_opt,lr_lambda=lambda step: rate(step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=config['warmup']),)
         trained_epochs = 0
@@ -572,16 +577,24 @@ def train(model_package, config, tagging, save = True):
         run_model_name = "BE"
     elif config['model_name'] == "TagInsertL2R":
         run_model_name = "TIL2R"
-    run_name = run_model_name + "_" + tagging + "_" + str(config['data_proportion'])
+    run_name = run_model_name + "_" + tagging + "_" + str(config['language']) + "_" + str(config['data_proportion'])
     with wandb.init(project="TagInsert", config=config, name = run_name):
         # load the BERT encoder, to remove if using pre calculated embeddings
-        bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
+        bert_name = BERT_FINDER[config['language']]
+        bert_model, tokenizer = load_BERT_encoder(bert_name, config['device'])
         # naming for paths logic
         prop_path = PROP_CONVERTER[config['data_proportion']]
         # load the mapping for the tags
-        tgt_map = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
-        # get the dataloaders for the training and validation data
-        train_dataloader, val_dataloader, len_train, len_val = get_dataloaders(f"data/{tagging}/processed/{prop_path}/", config)
+        if tagging == 'PMB':
+            language = config['language']
+            with open(f'data/{tagging}/{language}/processed/{tagging}_to_idx.json', 'r', encoding='utf-8') as f:
+                tgt_map = json.load(f)
+            # get the dataloaders for the training and validation data
+            train_dataloader, val_dataloader, len_train, len_val = get_dataloaders(f"data/{tagging}/{language}/processed/", config)
+        else:
+            tgt_map = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
+            # get the dataloaders for the training and validation data
+            train_dataloader, val_dataloader, len_train, len_val = get_dataloaders(f"data/{tagging}/processed/{prop_path}/", config)
         # initialize losses depending on the model
         if config['model_name'] == "VanillaTransformer" or config['model_name'] == "TagInsertL2R":
             criterion = LabelSmoothing(size=len(tgt_map), padding_idx=0, smoothing=0.0)
@@ -623,7 +636,7 @@ def train(model_package, config, tagging, save = True):
 
     # save model if specified
     if save:
-        model_name = config['model_name'] + "_" + tagging + "_" + str(config['data_proportion'])
+        model_name = config['model_name'] + "_" + tagging + "_" + str(config['language']) + "_" + str(config['data_proportion'])
         save_model(model, model_opt, lr_scheduler, all_train_losses, all_val_losses, epoch, f"models/{model_name}")
     return model
 
@@ -636,14 +649,27 @@ def preprocess_and_train_BERT_Encoder(config, tagging):
     """
     prop_path = PROP_CONVERTER[config['data_proportion']]
     # load the tokenizer and mapping for the tags
-    _, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
-    idx_to_tgt = json.load(open(f'data/{tagging}/processed/{prop_path}/idx_to_{tagging}.json'))
-    tgt_to_idx = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
+    bert_name = BERT_FINDER[config['language']]
+    _, tokenizer = load_BERT_encoder(bert_name, config['device'])
+    if tagging == 'PMB':
+        language = config['language']
+        with open(f'data/{tagging}/{language}/processed/idx_to_{tagging}.json', 'r', encoding='utf-8') as f:
+            idx_to_tgt = json.load(f)
+        with open(f'data/{tagging}/{language}/processed/{tagging}_to_idx.json', 'r', encoding='utf-8') as f:
+            tgt_to_idx = json.load(f)
+    else:
+        idx_to_tgt = json.load(open(f'data/{tagging}/processed/{prop_path}/idx_to_{tagging}.json'))
+        tgt_to_idx = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
     # load the BERT model for token classification
-    model = AutoModelForTokenClassification.from_pretrained(config['bert_model'], num_labels=len(tgt_to_idx), id2label=idx_to_tgt, label2id=tgt_to_idx)
+    model = AutoModelForTokenClassification.from_pretrained(bert_name, num_labels=len(tgt_to_idx), id2label=idx_to_tgt, label2id=tgt_to_idx)
+    model.resize_token_embeddings(len(tokenizer))
     # load the training and validation data
-    train_data = torch.load(f"data/{tagging}/processed/{prop_path}/train_data.pth", weights_only=True)
-    val_data = torch.load(f"data/{tagging}/processed/{prop_path}/val_data.pth", weights_only=True)
+    if tagging == 'PMB':
+        train_data = torch.load(f"data/{tagging}/{language}/processed/train_data.pth", weights_only=True)
+        val_data = torch.load(f"data/{tagging}/{language}/processed/val_data.pth", weights_only=True)
+    else:
+        train_data = torch.load(f"data/{tagging}/processed/{prop_path}/train_data.pth", weights_only=True)
+        val_data = torch.load(f"data/{tagging}/processed/{prop_path}/val_data.pth", weights_only=True)
     _, tags, original_sentences = train_data['words'], train_data['tags'], train_data['original_sentences']
     _, val_tags, val_original_sentences = val_data['words'], val_data['tags'], val_data['original_sentences']
     # remove start token and paddings from tags

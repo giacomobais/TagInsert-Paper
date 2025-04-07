@@ -9,6 +9,7 @@ from utils.train_utils import get_dataloaders, load_BERT_encoder, dataload, pad_
 
 
 PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%"}
+BERT_FINDER = {"en": "bert-base-cased", "de": "bert-base-german-cased", "it": "dbmdz/bert-base-italian-cased", "nl":"GroNLP/bert-base-dutch-cased"}
 
 @torch.no_grad()
 def evaluate(model, config, tagging):
@@ -19,10 +20,20 @@ def evaluate(model, config, tagging):
     model.eval()
     prop_path = PROP_CONVERTER[config['data_proportion']]
     # loads mappings and dataloader depending on the tagging task and proportion experiment
-    idx_to_tgt = json.load(open(f'data/{tagging}/processed/{prop_path}/idx_to_{tagging}.json'))
-    tgt_to_idx = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
-    idx_to_word = json.load(open(f'data/{tagging}/processed/{prop_path}/idx_to_word.json'))
-    _, val_dataloader, _, len_val = get_dataloaders(f"data/{tagging}/processed/{prop_path}/", config, shuffle=False)
+    if tagging == "PMB":
+        lang = config['language']
+        with open(f"data/{tagging}/{lang}/processed/idx_to_{tagging}.json", 'r', encoding='utf-8') as f:
+            idx_to_tgt = json.load(f)
+        with open(f"data/{tagging}/{lang}/processed/{tagging}_to_idx.json", 'r', encoding='utf-8') as f:
+            tgt_to_idx = json.load(f)
+        with open(f"data/{tagging}/{lang}/processed/idx_to_word.json", 'r', encoding='utf-8') as f:
+            idx_to_word = json.load(f)
+        _, val_dataloader, _, len_val = get_dataloaders(f"data/{tagging}/{lang}/processed/", config, shuffle=False)
+    else:
+        idx_to_tgt = json.load(open(f'data/{tagging}/processed/{prop_path}/idx_to_{tagging}.json'))
+        tgt_to_idx = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
+        idx_to_word = json.load(open(f'data/{tagging}/processed/{prop_path}/idx_to_word.json'))
+        _, val_dataloader, _, len_val = get_dataloaders(f"data/{tagging}/processed/{prop_path}/", config, shuffle=False)
     # naming for wandb tracking
     if config['model_name'] == "VanillaTransformer":
         run_model_name = "VT"
@@ -32,11 +43,12 @@ def evaluate(model, config, tagging):
         run_model_name = "BE"
     elif config['model_name'] == "TagInsertL2R":
         run_model_name = "TIL2R"
-    run_name = run_model_name + "_" + tagging + "_" + str(config['data_proportion']) + "_eval"
+    run_name = run_model_name + "_" + tagging + "_" + str(config['language']) + "_" + str(config['data_proportion']) + "_eval"
     # start evaluation run
     with wandb.init(project="TagInsert", config=config, name=run_name):
         # load BERT model and tokenizer
-        bert_model, tokenizer = load_BERT_encoder(config['bert_model'], config['device'])
+        bert_name = BERT_FINDER[config['language']]
+        bert_model, tokenizer = load_BERT_encoder(bert_name, config['device'])
         wandb.watch(model, log="all")
         data_iter = dataload(val_dataloader, config, bert_model, tokenizer, tgt_to_idx, pad=0)
         test_predictions = []
@@ -77,7 +89,8 @@ def evaluate(model, config, tagging):
         correct = 0
         total = 0
         i = 0
-        with open(f"predictions/{config['model_name']}/{tagging}/predictions_{config['model_name']}_{config['data_proportion']}.csv", "w") as f:
+        language = config['language']
+        with open(f"predictions/{config['model_name']}/{tagging}/predictions_{config['model_name']}_{language}_{config['data_proportion']}.csv", "w") as f:
             for words, gold, pred in zip(test_words, test_targets, test_predictions):
                 # Calculate sentence-level accuracy
                 sentence_correct = sum(1 for g, p in zip(gold, pred) if g == p)
