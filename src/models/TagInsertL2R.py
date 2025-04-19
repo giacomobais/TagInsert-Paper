@@ -46,7 +46,6 @@ def make_model_TIL2R(config, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
     attn = MultiHeadedAttention(h, d_model)
     ff = PositionwiseFeedForward(d_model, d_ff, dropout)
     position = PositionalEncoding(d_model, dropout)
-    # load mappings to det the vocab size for words and tags depending on the tagging task. Proportion does not matter, as mappings are the same for all proportions.
     tagging = config['tagging']
     if tagging == "PMB":
         lang = config['language']
@@ -64,7 +63,6 @@ def make_model_TIL2R(config, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
         nn.Sequential(POS_Embeddings(d_model, tgt_vocab), c(position)),
         Generator(d_model, tgt_vocab),
     )
-    # Xavier initialization of parameters
     for p in model.parameters():
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)

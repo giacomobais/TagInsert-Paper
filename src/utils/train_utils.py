@@ -636,8 +636,8 @@ def train(model_package, config, tagging, save = True):
 
     # save model if specified
     if save:
-        model_name = config['model_name'] + "_" + tagging + "_" + str(config['language']) + "_" + str(config['data_proportion'])
-        save_model(model, model_opt, lr_scheduler, all_train_losses, all_val_losses, epoch, f"models/{model_name}")
+        model_name = config['model_name'] + "_" + tagging + "_" + str(config['language']) + "_" + str(config['data_proportion']) + "_" + str(config['run'])
+        save_model(model, model_opt, lr_scheduler, all_train_losses, all_val_losses, epoch+1, f"models/{model_name}")
     return model
 
 ########## BERT Encoder Train+Eval logic ##########
@@ -704,12 +704,42 @@ def preprocess_and_train_BERT_Encoder(config, tagging):
     datasets = DatasetDict({'train': train_dataset, 'validation': val_dataset})
     data_collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
     # setup training
-    training_args = TrainingArguments(disable_tqdm=False, output_dir="models/BERT_Encoder", learning_rate=config['lr'], per_device_train_batch_size=config['batch_size'], per_device_eval_batch_size=config['batch_size'], num_train_epochs=config['epochs'], weight_decay=config['weight_decay'], evaluation_strategy="epoch", report_to="wandb")
+    output_dir = f"BE_{tagging}_{config['language']}_{str(config['data_proportion'])}_{config['run']}"
+    training_args = TrainingArguments(disable_tqdm=False, output_dir=output_dir, learning_rate=config['lr'], per_device_train_batch_size=config['batch_size'], per_device_eval_batch_size=config['batch_size'], num_train_epochs=config['epochs'], weight_decay=config['weight_decay'], evaluation_strategy="epoch", report_to="wandb")
     trainer = Trainer(model=model, args=training_args, train_dataset=datasets["train"], eval_dataset=datasets["validation"], tokenizer=tokenizer, data_collator=data_collator, compute_metrics=compute_metrics)
     # train, result are tracked through wandb
     _ = trainer.train()
     # save model
     trainer.save_model("models/BERT_Encoder")
+    # predict on the validation set and save file of predictions
+    predictions = trainer.predict(datasets["validation"])
+    pred = np.argmax(predictions.predictions, axis=2)
+    correct = 0
+    total = 0
+    i = 0
+    # language = config['language']
+    with open(f"predictions/{config['model_name']}/{tagging}/predictions_{config['model_name']}_{config['language']}_{config['data_proportion']}_{config['run']}.csv", "w") as f:
+        for i, sent in enumerate(pred):
+            words = val_dataset['tokens'][i]
+            gold = val_dataset['POS'][i]
+            gold = [idx_to_tgt[str(id)] for id in gold]
+            preds = [idx_to_tgt[str(id)] for j, id in enumerate(sent) if predictions.label_ids[i][j] != -100]
+            sentence_correct = sum(1 for g, p in zip(gold, preds) if g == p)
+            sentence_total = len(gold)
+            sentence_accuracy = sentence_correct / sentence_total
+    
+            # Accumulate overall accuracy stats
+            correct += sentence_correct
+            total += sentence_total
+            for j, (w, g, p) in enumerate(zip(words, gold, preds)):
+                f.write(f"{w}|{g}|{p}")
+                if j < len(words) - 1:
+                    f.write(", ")
+            f.write(f"\n Sentence accuracy: {sentence_accuracy}\n")
+            i+=1
+    
+        overall_accuracy = correct / total
+        f.write(f"Overall accuracy: {overall_accuracy}\n")
     return model
 
 def bad_tokens_and_map(tokenized_sentence, original_sentence, tokenizer, cased=True):

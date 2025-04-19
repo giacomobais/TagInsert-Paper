@@ -43,7 +43,7 @@ def evaluate(model, config, tagging):
         run_model_name = "BE"
     elif config['model_name'] == "TagInsertL2R":
         run_model_name = "TIL2R"
-    run_name = run_model_name + "_" + tagging + "_" + str(config['language']) + "_" + str(config['data_proportion']) + "_eval"
+    run_name = run_model_name + "_" + tagging + "_" + str(config['language']) + "_" + str(config['data_proportion']) + "_eval" + "_" + str(config['run'])
     # start evaluation run
     with wandb.init(project="TagInsert", config=config, name=run_name):
         # load BERT model and tokenizer
@@ -90,7 +90,7 @@ def evaluate(model, config, tagging):
         total = 0
         i = 0
         language = config['language']
-        with open(f"predictions/{config['model_name']}/{tagging}/predictions_{config['model_name']}_{language}_{config['data_proportion']}.csv", "w") as f:
+        with open(f"predictions/{config['model_name']}/{tagging}/predictions_{config['model_name']}_{language}_{config['data_proportion']}_{config['run']}.csv", "w") as f:
             for words, gold, pred in zip(test_words, test_targets, test_predictions):
                 # Calculate sentence-level accuracy
                 sentence_correct = sum(1 for g, p in zip(gold, pred) if g == p)
@@ -99,20 +99,22 @@ def evaluate(model, config, tagging):
                 # Accumulate overall accuracy stats
                 correct += sentence_correct
                 total += sentence_total
-                # Write predictions to file, format depends on the model as TI has ordering
+                
                 if config['model_name'] == "TagInsert":
                     order = test_orders[i].tolist()
                     for j, (w, g, p, o) in enumerate(zip(words, gold, pred, order)):
                         f.write(f"{w}|{g}|{p}|{o}")
                         if j < len(words) - 1:
-                            f.write(",")
+                            f.write(", ")
                 else:
                     for j, (w, g, p) in enumerate(zip(words, gold, pred)):
                         f.write(f"{w}|{g}|{p}")
                         if j < len(words) - 1:
-                            f.write(",")
+                            f.write(", ")
                 f.write(f"\n Sentence accuracy: {sentence_accuracy}\n")
                 i+=1
+
+
                 # Calculate overall accuracy
             overall_accuracy = correct / total
             f.write(f"Overall accuracy: {overall_accuracy}\n")

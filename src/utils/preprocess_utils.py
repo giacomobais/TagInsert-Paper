@@ -148,15 +148,6 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
         sentence_idx = [word_to_idx[word] for word in sentence]
         sentence_idx += [word_to_idx['<PAD>']] * (config['block_size'] - len(sentence_idx))
         test_sentence_tokens_idx.append(sentence_idx)
-
-    # # extract BERT embeddings in batches of batch_size
-    # train_embs = []
-    # # load the BERT model and tokenizer
-    # bert_name = BERT_FINDER[config['language']]
-    # bert_model, tokenizer = load_BERT_encoder(bert_name, config['device'])
-    # for i in range(0, len(sentence_tokens_idx), config['batch_size']):
-    #     embs = extract_BERT_embs(sentence_tokens[i:i+config['batch_size']], bert_model, tokenizer, config)
-    #     train_embs.append(embs)
     
     # randomly sample a proportion of the training data, depending on the config file
     keep_proportion = float(config['data_proportion'])
@@ -167,20 +158,6 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
         sentence_tokens_idx = [sentence_tokens_idx[i] for i in sentences_to_keep]
         sentence_POS_idx = [sentence_POS_idx[i] for i in sentences_to_keep]
         sentence_tokens = [sentence_tokens[i] for i in sentences_to_keep]
-        # train_embs = [train_embs[i] for i in sentences_to_keep]
-    # train_embs = torch.cat(train_embs, dim=0)
-
-    # extract BERT embeddings for validation and test data
-    # val_embs = []
-    # for i in range(0, len(val_sentence_tokens_idx), config['batch_size']):
-    #     embs = extract_BERT_embs(val_sentence_tokens[i:i+config['batch_size']], bert_model, tokenizer, config)
-    #     val_embs.append(embs)
-    # val_embs = torch.cat(val_embs, dim=0)
-    # test_embs = []
-    # for i in range(0, len(test_sentence_tokens_idx), config['batch_size']):
-    #     embs = extract_BERT_embs(test_sentence_tokens[i:i+config['batch_size']], bert_model, tokenizer, config)
-    #     test_embs.append(embs)
-    # test_embs = torch.cat(test_embs, dim=0)
 
     # renaming for handiness
     train_words = sentence_tokens_idx
@@ -196,9 +173,6 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
     # saving processed data
     prop_path = PROP_CONVERTER[keep_proportion]
 
-    # torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences, 'embs': train_embs}, f'data/{tagging}/processed/{prop_path}/train_data.pth')
-    # torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences, 'embs': val_embs}, f'data/{tagging}/processed/{prop_path}/val_data.pth')
-    # torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences, 'embs': test_embs}, f'data/{tagging}/processed/{prop_path}/test_data.pth')
     if tagging == 'PMB':
         language = config['language']
         torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/{tagging}/{language}/processed/train_data.pth')
