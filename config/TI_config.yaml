@@ -12,7 +12,7 @@ epochs: 10
 block_size: 102
 bert_block_size: 200
 hidden_size: 768
-data_proportion: 1
+data_proportion: 1000
 embedding_strategy: "prefix"
 tagging: "PMB"
-language: "nl"
+language: "en"

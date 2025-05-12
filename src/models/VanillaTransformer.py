@@ -9,6 +9,7 @@ import json
 Most of the code in this file is taken from the Annotated Transformer tutorial.
 by Harvard NLP: https://nlp.seas.harvard.edu/annotated-transformer/
 """
+PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%", 1000: "1000"}
 
 class EncoderDecoder(nn.Module):
     """
@@ -261,9 +262,10 @@ def make_model_VT(config, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
     position = PositionalEncoding(d_model, dropout)
     tagging = config['tagging']
     if tagging == "PMB":
+        prop_path = PROP_CONVERTER[config['data_proportion']]
         lang = config['language']
-        word_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/word_to_idx.json"))
-        tgt_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/{tagging}_to_idx.json"))
+        word_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/{prop_path}/word_to_idx.json"))
+        tgt_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/{prop_path}/{tagging}_to_idx.json"))
     else:
         word_to_idx = json.load(open(f"data/{tagging}/processed/100%/word_to_idx.json"))
         tgt_to_idx = json.load(open(f"data/{tagging}/processed/100%/{tagging}_to_idx.json"))

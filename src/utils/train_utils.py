@@ -20,7 +20,7 @@ import pandas as pd
 ############# Logic for training of all models, including processing of data before forwarding, datasets classes and batches #############
 
 # Converter for the path of the processed data, proportion to percentage
-PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%"}
+PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%", 1000: "1000"}
 BERT_FINDER = {"en": "bert-base-cased", "de": "bert-base-german-cased", "it": "dbmdz/bert-base-italian-cased", "nl":"GroNLP/bert-base-dutch-cased"}
 
 #### General Training utils #####
@@ -587,10 +587,10 @@ def train(model_package, config, tagging, save = True):
         # load the mapping for the tags
         if tagging == 'PMB':
             language = config['language']
-            with open(f'data/{tagging}/{language}/processed/{tagging}_to_idx.json', 'r', encoding='utf-8') as f:
+            with open(f'data/{tagging}/{language}/processed/{prop_path}/{tagging}_to_idx.json', 'r', encoding='utf-8') as f:
                 tgt_map = json.load(f)
             # get the dataloaders for the training and validation data
-            train_dataloader, val_dataloader, len_train, len_val = get_dataloaders(f"data/{tagging}/{language}/processed/", config)
+            train_dataloader, val_dataloader, len_train, len_val = get_dataloaders(f"data/{tagging}/{language}/processed/{prop_path}/", config)
         else:
             tgt_map = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))
             # get the dataloaders for the training and validation data
@@ -653,9 +653,9 @@ def preprocess_and_train_BERT_Encoder(config, tagging):
     _, tokenizer = load_BERT_encoder(bert_name, config['device'])
     if tagging == 'PMB':
         language = config['language']
-        with open(f'data/{tagging}/{language}/processed/idx_to_{tagging}.json', 'r', encoding='utf-8') as f:
+        with open(f'data/{tagging}/{language}/processed/{prop_path}/idx_to_{tagging}.json', 'r', encoding='utf-8') as f:
             idx_to_tgt = json.load(f)
-        with open(f'data/{tagging}/{language}/processed/{tagging}_to_idx.json', 'r', encoding='utf-8') as f:
+        with open(f'data/{tagging}/{language}/processed/{prop_path}/{tagging}_to_idx.json', 'r', encoding='utf-8') as f:
             tgt_to_idx = json.load(f)
     else:
         idx_to_tgt = json.load(open(f'data/{tagging}/processed/{prop_path}/idx_to_{tagging}.json'))
@@ -665,8 +665,8 @@ def preprocess_and_train_BERT_Encoder(config, tagging):
     model.resize_token_embeddings(len(tokenizer))
     # load the training and validation data
     if tagging == 'PMB':
-        train_data = torch.load(f"data/{tagging}/{language}/processed/train_data.pth", weights_only=True)
-        val_data = torch.load(f"data/{tagging}/{language}/processed/val_data.pth", weights_only=True)
+        train_data = torch.load(f"data/{tagging}/{language}/processed/{prop_path}/train_data.pth", weights_only=True)
+        val_data = torch.load(f"data/{tagging}/{language}/processed/{prop_path}/val_data.pth", weights_only=True)
     else:
         train_data = torch.load(f"data/{tagging}/processed/{prop_path}/train_data.pth", weights_only=True)
         val_data = torch.load(f"data/{tagging}/processed/{prop_path}/val_data.pth", weights_only=True)

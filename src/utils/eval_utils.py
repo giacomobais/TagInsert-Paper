@@ -22,13 +22,13 @@ def evaluate(model, config, tagging):
     # loads mappings and dataloader depending on the tagging task and proportion experiment
     if tagging == "PMB":
         lang = config['language']
-        with open(f"data/{tagging}/{lang}/processed/idx_to_{tagging}.json", 'r', encoding='utf-8') as f:
+        with open(f"data/{tagging}/{lang}/processed/{prop_path}/idx_to_{tagging}.json", 'r', encoding='utf-8') as f:
             idx_to_tgt = json.load(f)
-        with open(f"data/{tagging}/{lang}/processed/{tagging}_to_idx.json", 'r', encoding='utf-8') as f:
+        with open(f"data/{tagging}/{lang}/processed/{prop_path}/{tagging}_to_idx.json", 'r', encoding='utf-8') as f:
             tgt_to_idx = json.load(f)
-        with open(f"data/{tagging}/{lang}/processed/idx_to_word.json", 'r', encoding='utf-8') as f:
+        with open(f"data/{tagging}/{lang}/processed/{prop_path}/idx_to_word.json", 'r', encoding='utf-8') as f:
             idx_to_word = json.load(f)
-        _, val_dataloader, _, len_val = get_dataloaders(f"data/{tagging}/{lang}/processed/", config, shuffle=False)
+        _, val_dataloader, _, len_val = get_dataloaders(f"data/{tagging}/{lang}/processed/{prop_path}/", config, shuffle=False)
     else:
         idx_to_tgt = json.load(open(f'data/{tagging}/processed/{prop_path}/idx_to_{tagging}.json'))
         tgt_to_idx = json.load(open(f'data/{tagging}/processed/{prop_path}/{tagging}_to_idx.json'))

@@ -4,7 +4,7 @@ import json
 import numpy as np
 from transformers import AutoModel, AutoTokenizer
 
-PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%"}
+PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%", 1000: "1000"}
 BERT_FINDER = {"en": "bert-base-cased", "de": "bert-base-german-cased", "it": "dbmdz/bert-base-italian-cased", "nl":"GroNLP/bert-base-dutch-cased"}
 
 def load_config(config_path):
@@ -153,7 +153,13 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
     keep_proportion = float(config['data_proportion'])
     if keep_proportion == 1.0:
         keep_proportion = 1
-    if keep_proportion != 1:
+    if keep_proportion == 1000.0:
+        keep_proportion = 1000
+        sentences_to_keep = np.random.choice(len(sentence_tokens_idx), keep_proportion, replace = False)
+        sentence_tokens_idx = [sentence_tokens_idx[i] for i in sentences_to_keep]
+        sentence_POS_idx = [sentence_POS_idx[i] for i in sentences_to_keep]
+        sentence_tokens = [sentence_tokens[i] for i in sentences_to_keep]
+    elif keep_proportion != 1:
         sentences_to_keep = np.random.choice(len(sentence_tokens_idx), int(len(sentence_tokens_idx)*keep_proportion), replace = False)
         sentence_tokens_idx = [sentence_tokens_idx[i] for i in sentences_to_keep]
         sentence_POS_idx = [sentence_POS_idx[i] for i in sentences_to_keep]
@@ -175,9 +181,9 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
 
     if tagging == 'PMB':
         language = config['language']
-        torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/{tagging}/{language}/processed/train_data.pth')
-        torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/{tagging}/{language}/processed/val_data.pth')
-        torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, f'data/{tagging}/{language}/processed/test_data.pth')
+        torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/{tagging}/{language}/processed/{prop_path}/train_data.pth')
+        torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/{tagging}/{language}/processed/{prop_path}/val_data.pth')
+        torch.save({'words': test_words, 'tags': test_tags, 'original_sentences': test_original_sentences}, f'data/{tagging}/{language}/processed/{prop_path}/test_data.pth')
     else:
         torch.save({'words': train_words, 'tags': train_tags, 'original_sentences': train_original_sentences}, f'data/{tagging}/processed/{prop_path}/train_data.pth')
         torch.save({'words': val_words, 'tags': val_tags, 'original_sentences': val_original_sentences}, f'data/{tagging}/processed/{prop_path}/val_data.pth')
@@ -187,13 +193,13 @@ def prepare_data(train_file, val_file, test_file, tagging, config):
     # saving mappings
     if tagging == 'PMB':
         language = config['language']
-        with open(f'data/{tagging}/{language}/processed/word_to_idx.json', 'w', encoding='utf-8') as f:
+        with open(f'data/{tagging}/{language}/processed/{prop_path}/word_to_idx.json', 'w', encoding='utf-8') as f:
             json.dump(word_to_idx, f, ensure_ascii=False)
-        with open(f'data/{tagging}/{language}/processed/idx_to_word.json', 'w', encoding='utf-8') as f:
+        with open(f'data/{tagging}/{language}/processed/{prop_path}/idx_to_word.json', 'w', encoding='utf-8') as f:
             json.dump(idx_to_word, f, ensure_ascii=False)
-        with open(f'data/{tagging}/{language}/processed/{tagging}_to_idx.json', 'w', encoding='utf-8') as f:
+        with open(f'data/{tagging}/{language}/processed/{prop_path}/{tagging}_to_idx.json', 'w', encoding='utf-8') as f:
             json.dump(POS_to_idx, f, ensure_ascii=False)
-        with open(f'data/{tagging}/{language}/processed/idx_to_{tagging}.json', 'w', encoding='utf-8') as f:
+        with open(f'data/{tagging}/{language}/processed/{prop_path}/idx_to_{tagging}.json', 'w', encoding='utf-8') as f:
             json.dump(idx_to_POS, f, ensure_ascii=False)
     else:
         with open(f'data/{tagging}/processed/{prop_path}/word_to_idx.json', 'w') as f:

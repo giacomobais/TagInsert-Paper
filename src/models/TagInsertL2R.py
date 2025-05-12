@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import json
 from src.models.VanillaTransformer import MultiHeadedAttention, Generator, PositionwiseFeedForward, PositionalEncoding, Embeddings, Encoder, EncoderLayer, Decoder, DecoderLayer, POS_Embeddings
 
-
+PROP_CONVERTER = {1: "100%", 0.75: "75%", 0.5: "50%", 0.25: "25%", 0.1: "10%", 1000: "1000"}
 class TagInsertL2R(nn.Module):
     """
     Class for the TagInsertL2R model. This model is a Vanilla Transformer model with the addition of the source embeddings to the target embeddings.
@@ -49,8 +49,9 @@ def make_model_TIL2R(config, N=8, d_model=768, d_ff=768*4, h=8, dropout=0.1):
     tagging = config['tagging']
     if tagging == "PMB":
         lang = config['language']
-        word_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/word_to_idx.json"))
-        tgt_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/{tagging}_to_idx.json"))
+        prop_path = PROP_CONVERTER[config['data_proportion']]
+        word_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/{prop_path}/word_to_idx.json"))
+        tgt_to_idx = json.load(open(f"data/{tagging}/{lang}/processed/{prop_path}/{tagging}_to_idx.json"))
     else:
         word_to_idx = json.load(open(f"data/{tagging}/processed/100%/word_to_idx.json"))
         tgt_to_idx = json.load(open(f"data/{tagging}/processed/100%/{tagging}_to_idx.json"))
