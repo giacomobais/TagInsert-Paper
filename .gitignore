@@ -7,3 +7,9 @@ new_sec_01-22.tagged
 *.csv
 *.stagged
 *.tagged
+DS_Store
+*.DS_Store
+*.ipynb_checkpoints
+*.pyc
+__pycache__
+predictions/*
